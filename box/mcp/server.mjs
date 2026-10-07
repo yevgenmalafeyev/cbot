@@ -140,6 +140,9 @@ if (ROLE === 'front') {
 
 // ------------------------------------------------------------------ task tools
 if (ROLE === 'task') {
+  coreTool('nothing_to_report',
+    'For runs started by a schedule or by arriving mail: the run went well and there is nothing the owner needs to hear about. They are then not messaged at all. Call it once, then end.',
+    {});
   coreTool('send_message',
     'Send the owner a short interim message. Not for the final result: that is your last reply.',
     { text: z.string() });

@@ -27,7 +27,9 @@ exactly one Telegram account: yours.
   the agent's machine is never handed the value.
 - **Mail.** Gmail (API) and any IMAP/SMTP mailbox, any number per bot. A mail
   watch starts a task only when a matching message arrives.
-- **Schedules.** Recurring (cron) and one-off tasks.
+- **Schedules.** Recurring (cron) and one-off tasks. Scheduled and
+  mail-triggered runs work out of sight and message you only when they have
+  something for you.
 - **A fleet.** Ask the main bot for another bot with its own role. Each gets
   its own Telegram identity, memory, Chrome profile and screen.
 - **Voice and files.** Voice messages are transcribed (optional, Groq); files

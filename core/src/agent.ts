@@ -135,10 +135,15 @@ export function taskList(botId: number): string {
   }).join('\n');
 }
 
-/** Queue a task and show the owner its status message. */
-export async function createTask(botId: number, title: string, instructions: string, model: string, needsScreen: boolean): Promise<TaskRow> {
-  const t = tasks.create(botId, title.slice(0, 120), instructions, model || config.taskModel, needsScreen);
-  const msgId = await tg.send(botId, statusText(t)).catch(() => 0);
+/**
+ * Queue a task and show the owner its status message.
+ * unattended: started by a schedule or by arriving mail. Nobody is waiting for
+ * it, so it works out of sight: no status message, and no result message
+ * either when it has nothing for the owner (see nothing_to_report).
+ */
+export async function createTask(botId: number, title: string, instructions: string, model: string, needsScreen: boolean, unattended = false): Promise<TaskRow> {
+  const t = tasks.create(botId, title.slice(0, 120), instructions, model || config.taskModel, needsScreen, unattended);
+  const msgId = unattended ? 0 : await tg.send(botId, statusText(t)).catch(() => 0);
   if (msgId) tasks.update(t.id, { status_msg_id: msgId });
   pump();
   return tasks.get(t.id)!;
@@ -175,7 +180,7 @@ async function runTask(t: TaskRow): Promise<void> {
 
   const r = await runClaude({
     runId: `task-${t.id}`, role: 'task', bot, taskId: t.id, model: t.model,
-    systemPrompt: taskPrompt(bot, !!t.needs_screen),
+    systemPrompt: taskPrompt(bot, !!t.needs_screen, !!t.unattended),
     prompt: t.resume ? 'You were interrupted. Continue the task from where you stopped.' : `# Task: ${t.title}\n\n${t.instructions}`,
     sessionId: t.session_id, resume: !!(t.resume && t.session_id), screen: !!t.needs_screen,
     onEvent: (ev) => {
@@ -204,6 +209,12 @@ async function runTask(t: TaskRow): Promise<void> {
   clearTimeout(statusTimers.get(t.id)); statusTimers.delete(t.id);
   if (current.status_msg_id && !(await tg.remove(t.bot_id, current.status_msg_id))) refreshStatus(t.id, true);
   const done = tasks.get(t.id)!;
+  // An unattended run that went well and has nothing for the owner ends without a message.
+  if (r.ok && done.unattended && (done.quiet || !r.text.trim())) {
+    log(`task #${t.id} had nothing to report`);
+    events.add(t.bot_id, `The unattended task #${t.id} "${t.title}" ran and had nothing to report, so the owner was not messaged.${r.text.trim() ? ` Its note: ${quoted(r.text.trim().slice(0, 500))}` : ''}`);
+    return pump();
+  }
   const body = r.text.trim() || (r.ok ? 'Done.' : 'The task failed without an explanation.');
   const head = `${r.ok ? '✅' : '❌'} **#${t.id} ${t.title}** (${duration(done)})`;
   await tg.send(t.bot_id, `${head}\n\n${body}`)
@@ -587,6 +598,12 @@ export async function toolCall(ctx: RunContext, tool: string, a: any): Promise<R
       requests.setMessage(r.id, msgId);
       refreshStatus(task!.id, true);
       return { wait: r.id };
+    }
+    case 'nothing_to_report': {
+      if (ctx.role !== 'task' || !task) break;
+      if (!task.unattended) return { error: 'The owner started this task themselves and expects a result: end with it.' };
+      tasks.update(task.id, { quiet: 1 });
+      return { result: 'Noted: the owner will not be messaged about this run. End now; whatever you write as your last reply is kept as a note and not sent.' };
     }
     // The value never goes to the box: core types it on the screen itself.
     case 'type_secret': {

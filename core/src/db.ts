@@ -86,10 +86,18 @@ CREATE TABLE IF NOT EXISTS events (   -- notes for a bot's chat session, deliver
 `);
 
 export interface BotRow { id: number; slug: string; name: string; token_enc: Buffer | null; instructions: string; session_id: string | null; created_at: number }
+for (const col of ['unattended INTEGER NOT NULL DEFAULT 0', 'quiet INTEGER NOT NULL DEFAULT 0']) {
+  try { db.exec(`ALTER TABLE tasks ADD COLUMN ${col}`); } catch { /* already there */ }
+}
+
 export interface TaskRow {
   id: number; bot_id: number; title: string; instructions: string; model: string; needs_screen: number;
   status: string; session_id: string | null; resume: number; status_msg_id: number | null; progress: string | null;
   result: string | null; created_at: number; started_at: number | null; finished_at: number | null;
+  /** 1: started by a schedule or by arriving mail, not by the owner just now */
+  unattended: number;
+  /** set by the task itself: it found nothing the owner needs to hear about */
+  quiet: number;
 }
 export interface ScheduleRow {
   id: number; bot_id: number; title: string; instructions: string; cron: string | null; model: string; needs_screen: number;
@@ -133,9 +141,9 @@ export const bots = {
 
 export const tasks = {
   get: (id: number) => db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined,
-  create(botId: number, title: string, instructions: string, model: string, needsScreen: boolean): TaskRow {
-    const r = db.prepare(`INSERT INTO tasks (bot_id, title, instructions, model, needs_screen, status, created_at)
-      VALUES (?, ?, ?, ?, ?, 'queued', ?)`).run(botId, title, instructions, model, needsScreen ? 1 : 0, now());
+  create(botId: number, title: string, instructions: string, model: string, needsScreen: boolean, unattended = false): TaskRow {
+    const r = db.prepare(`INSERT INTO tasks (bot_id, title, instructions, model, needs_screen, unattended, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)`).run(botId, title, instructions, model, needsScreen ? 1 : 0, unattended ? 1 : 0, now());
     return tasks.get(Number(r.lastInsertRowid))!;
   },
   update(id: number, fields: Partial<TaskRow>) {

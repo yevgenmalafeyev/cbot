@@ -53,7 +53,7 @@ async function fire(s: ScheduleRow): Promise<void> {
     console.log(`[schedule] #${s.id} skipped: previous run (task #${prev.id}) has not finished`);
     return;
   }
-  const t = await createTask(s.bot_id, `⏰ ${s.title}`, s.instructions, s.model, !!s.needs_screen);
+  const t = await createTask(s.bot_id, `⏰ ${s.title}`, s.instructions, s.model, !!s.needs_screen, true);
   schedules.update(s.id, { last_task_id: t.id });
   console.log(`[schedule] #${s.id} fired as task #${t.id}`);
 }
