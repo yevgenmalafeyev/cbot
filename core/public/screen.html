@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Bot screen</title><link rel="stylesheet" href="/assets/base.css">
+<script src="/assets/telegram-web-app.js"></script>
+<style>
+  html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+  /* full screen inside Telegram: keep clear of the status bar and Telegram's own controls */
+  body { display: flex; flex-direction: column; gap: .5rem; padding: .5rem; padding-top: calc(.5rem + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)); background: #000; color: #eceef1; }
+  /* a floating bar above the screen; amber while the bot is asking for something */
+  header, #keys { border-radius: 14px; background: #17181b; }
+  header { display: flex; gap: .5rem; align-items: center; padding: .45rem .5rem .45rem .9rem; }
+  header.ask { background: #33240f; color: #f7b955; }
+  #reason { flex: 1; min-width: 0; font-size: .92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* on a phone the text gets a row of its own, with the buttons under it */
+  @media (max-width: 600px) {
+    header { flex-wrap: wrap; justify-content: flex-end; padding: .5rem .5rem .5rem .8rem; }
+    #reason { flex-basis: 100%; white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+  }
+  #state { font-size: .8rem; opacity: .65; white-space: nowrap; }
+  header form { margin: 0; }
+  header button, #keys button { width: auto; padding: .35rem .8rem; border-radius: 999px; font-size: .88rem; font-weight: 500; white-space: nowrap; background: #fff; color: #111; border: 1px solid transparent; }
+  header button.ghost, #keys button { background: rgba(0, 0, 0, .35); color: #f2f3f5; border-color: rgba(255, 255, 255, .16); }
+  [hidden] { display: none !important; }
+  /* the keyboard toggle only makes sense without a physical keyboard */
+  #kbd { display: none; }
+  @media (pointer: coarse) { #kbd { display: block; } }
+  #screen { flex: 1; min-height: 0; touch-action: none; }
+  #screen canvas { border-radius: 10px; }
+  #keys { display: none; gap: .35rem; padding: .45rem .5rem; align-items: center; overflow-x: auto; }
+  #keys.on { display: flex; }
+  #keys input { flex: 1 1 8rem; min-width: 7rem; margin: 0; padding: .4rem .8rem; border-radius: 999px; background: #000; color: #eceef1; border-color: rgba(255, 255, 255, .16); }
+  #keys button.send { background: #fff; color: #111; border-color: transparent; }
+</style></head>
+<body>
+<header>
+  <span id="reason"></span>
+  <span id="state">connecting…</span>
+  <button class="ghost" id="kbd" type="button">Keyboard</button>
+  <form method="post" action="/h/{{token}}/cancel" class="ask" id="cancel" hidden><button class="ghost" type="submit">Cancel</button></form>
+  <form method="post" action="/h/{{token}}/done" class="ask" id="done" hidden><button type="submit">I'm done, go on</button></form>
+  <button class="ghost" id="close" type="button" hidden>Close</button>
+</header>
+<div id="screen"></div>
+<div id="keys">
+  <input id="text" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type, then Send">
+  <button class="send" data-act="send" type="button">Send</button>
+  <button data-key="0xff0d" type="button">Enter</button>
+  <button data-key="0xff09" type="button">Tab</button>
+  <button data-key="0xff08" type="button">Del</button>
+  <button data-key="0xff1b" type="button">Esc</button>
+  <button data-act="hide" type="button" title="Mask what you type">Hide</button>
+</div>
+<script type="module">
+  import RFB from '/novnc/core/rfb.js';
+
+  const state = document.getElementById('state');
+  const input = document.getElementById('text');
+
+  // Inside Telegram the launch data is what proves this is the owner; in a
+  // browser it is empty and the cookie of the claimed link does that.
+  const tg = window.Telegram?.WebApp;
+  const auth = tg?.initData ? `?tg=${encodeURIComponent(tg.initData)}` : '';
+  let leave;
+  if (auth) {
+    tg.ready();
+    tg.expand();
+    // a 1280x800 desktop needs all the room there is; older clients only have expand()
+    try { if (tg.isVersionAtLeast('8.0')) tg.requestFullscreen(); } catch {}
+    // Telegram answers close() in full screen by only leaving full screen:
+    // leave it first, and close for real once that has happened.
+    leave = () => {
+      if (!tg.isFullscreen) return tg.close();
+      tg.onEvent('fullscreenChanged', () => tg.close());
+      setTimeout(() => tg.close(), 400);
+      try { tg.exitFullscreen(); } catch { tg.close(); }
+    };
+    document.getElementById('close').onclick = leave;
+    document.querySelectorAll('.ask').forEach((f) => f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await fetch(f.action + auth, { method: 'POST' }).catch(() => {});
+      leave();
+    }));
+  }
+
+  // Show what the bot is asking for, and the answer buttons only while it is
+  // waiting or handed the screen over itself. A link that has been used up answers 404: go to the
+  // explanation page.
+  async function refresh() {
+    try {
+      const r = await fetch('/h/{{token}}/state' + auth, { cache: 'no-store' });
+      // inside Telegram there is nothing left to show: the answer was given, here or in the chat
+      if (r.status === 404) return leave ? leave() : location.replace('/h/{{token}}');
+      const s = await r.json();
+      document.getElementById('reason').textContent = s.reason;
+      const ask = s.pending || s.asked;
+      document.querySelector('header').classList.toggle('ask', ask);
+      document.getElementById('done').hidden = !ask;
+      document.getElementById('cancel').hidden = !s.pending;
+      // when the bot asked for nothing there is only the view to leave
+      document.getElementById('close').hidden = !auth || ask;
+    } catch {}
+  }
+  refresh();
+  setInterval(refresh, 5000);
+
+  let rfb;
+  function connect() {
+    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/h/{{token}}/ws${auth}`;
+    rfb = new RFB(document.getElementById('screen'), url);
+    rfb.background = 'transparent';
+    rfb.scaleViewport = true;      // fit the 1280x800 desktop into whatever screen this is
+    rfb.resizeSession = false;     // the bot relies on a fixed resolution
+    rfb.addEventListener('connect', () => { state.textContent = ''; rfb.focus(); });
+    rfb.addEventListener('disconnect', () => {
+      state.textContent = 'disconnected, retrying…';
+      setTimeout(connect, 3000);
+    });
+  }
+  connect();
+
+  // Phones have no physical keyboard and noVNC cannot summon the on-screen one
+  // reliably, so text goes through a normal input and is replayed as key events.
+  const keysym = (ch) => { const cp = ch.codePointAt(0); return cp < 0x100 ? cp : 0x01000000 | cp; };
+  function sendText() {
+    for (const ch of input.value) rfb.sendKey(ch === '\n' ? 0xff0d : keysym(ch));
+    input.value = '';
+    input.focus();
+  }
+  document.getElementById('kbd').onclick = () => {
+    const on = document.getElementById('keys').classList.toggle('on');
+    if (on) input.focus(); else rfb.focus();
+  };
+  document.getElementById('keys').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.key) rfb.sendKey(Number(b.dataset.key));
+    else if (b.dataset.act === 'send') sendText();
+    else if (b.dataset.act === 'hide') {
+      input.type = input.type === 'password' ? 'text' : 'password';
+      b.textContent = input.type === 'password' ? 'Show' : 'Hide';
+    }
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); if (input.value) sendText(); else rfb.sendKey(0xff0d); }
+  });
+</script>
+</body></html>

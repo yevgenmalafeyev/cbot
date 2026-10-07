@@ -1,0 +1,12 @@
+:root { color-scheme: light dark; --bg: #f4f5f7; --card: #fff; --fg: #15171a; --muted: #667085; --accent: #2f6fed; --line: #d9dde3; }
+@media (prefers-color-scheme: dark) { :root { --bg: #101215; --card: #1a1d21; --fg: #eceef1; --muted: #98a2b3; --line: #2c3138; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--fg); }
+.card { max-width: 26rem; margin: 12vh auto 0; padding: 1.5rem; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.wrap { padding: 0 1rem; }
+h1 { font-size: 1.2rem; margin: 0 0 .6rem; }
+p { margin: 0 0 1rem; color: var(--muted); overflow-wrap: anywhere; }
+button, .btn { font: inherit; font-weight: 600; padding: .7rem 1rem; border: 0; border-radius: 10px; background: var(--accent); color: #fff; cursor: pointer; width: 100%; }
+input[type=password], input[type=text] { font: inherit; width: 100%; padding: .7rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); margin-bottom: .8rem; }
+[hidden] { display: none !important; }
+code { font-family: ui-monospace, Menlo, monospace; }

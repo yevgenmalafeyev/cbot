@@ -1,0 +1,9 @@
+{
+  "RestoreOnStartup": 1,
+  "DefaultBrowserSettingEnabled": false,
+  "MetricsReportingEnabled": false,
+  "PromotionsEnabled": false,
+  "BrowserSignin": 0,
+  "PasswordManagerEnabled": false,
+  "BackgroundModeEnabled": false
+}

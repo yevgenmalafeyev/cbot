@@ -1,0 +1,14 @@
+<button id="close" type="button" hidden>Close</button>
+<script src="/assets/telegram-web-app.js"></script>
+<script>
+  // Inside Telegram there is nothing left to do here: count down and close.
+  if (window.TelegramWebviewProxy || window.parent !== window) {
+    const b = document.getElementById('close');
+    const close = () => window.Telegram?.WebApp?.close();
+    let left = 5;
+    const tick = () => { b.textContent = `Close (${left})`; if (left-- <= 0) close(); else setTimeout(tick, 1000); };
+    b.hidden = false;
+    b.onclick = close;
+    tick();
+  }
+</script>

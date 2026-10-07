@@ -1,0 +1,27 @@
+{
+  "name": "cbot-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p .",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "croner": "^10.0.1",
+    "grammy": "^1.37.0",
+    "imapflow": "^2.2.5",
+    "mailparser": "^3.9.36",
+    "nodemailer": "^10.0.15",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/mailparser": "^3.9.0",
+    "@types/node": "^22.15.0",
+    "@types/nodemailer": "^8.0.2",
+    "@types/ws": "^8.18.0",
+    "typescript": "^5.8.0"
+  }
+}

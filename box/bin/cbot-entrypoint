@@ -1,0 +1,37 @@
+#!/bin/bash
+# Box entrypoint: prepare the persistent home, replay the bots' own system
+# setup, then run boxd (the daemon core uses to start Claude sessions here).
+set -u
+
+mkdir -p /run/cbot /tmp/.X11-unix
+chmod 1777 /run/cbot /tmp/.X11-unix
+
+# /home/bot is a volume; seed it on first start.
+if [ ! -e /home/bot/.cbot/seeded ]; then
+    cp -rn /etc/skel/. /home/bot/ 2>/dev/null || true
+    cp -rn /opt/cbot/skel/. /home/bot/
+    mkdir -p /home/bot/.cbot /home/bot/bots /home/bot/shared /home/bot/inbox
+    touch /home/bot/.cbot/seeded
+fi
+chown bot:bot /home/bot
+chown -R bot:bot /home/bot/.cbot /home/bot/bots /home/bot/shared /home/bot/inbox /home/bot/.config 2>/dev/null || true
+
+# System packages do not survive a container rebuild, the home volume does.
+# Bots append their install commands to this script so a rebuild replays them.
+if [ -x /home/bot/.cbot/setup.sh ]; then
+    echo "[entrypoint] replaying /home/bot/.cbot/setup.sh"
+    timeout 900 /home/bot/.cbot/setup.sh || echo "[entrypoint] setup.sh failed (continuing)"
+fi
+
+# Office exit for the browsers (see boxd/exitd.mjs). Only when configured;
+# Chrome's wrapper looks for the flag file.
+rm -f /run/cbot/exitd.on
+if [ -n "${OFFICE_PROXY:-}" ]; then
+    touch /run/cbot/exitd.on
+    ( while true; do
+          setpriv --reuid=1000 --regid=1000 --clear-groups node /opt/cbot/boxd/exitd.mjs
+          echo "[entrypoint] exitd exited, restarting in 5s"; sleep 5
+      done ) &
+fi
+
+exec node /opt/cbot/boxd/boxd.mjs

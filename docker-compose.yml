@@ -1,0 +1,77 @@
+name: cbot
+
+# Sized for a small shared server: together the two containers get 4 GB and
+# 2.5 CPUs. Raise the limits if the host is dedicated.
+#
+#   core  the control plane. Telegram tokens, the secret store and its key live
+#         here and nowhere else.
+#   box   the bots' computer. Agents are effectively root in it and read the
+#         open web, so it gets nothing from the host: no bind mounts beyond its
+#         own home, no Docker socket, and no route to the private network (see
+#         deploy/firewall).
+
+services:
+  core:
+    build: ./core
+    image: cbot-core
+    container_name: cbot-core
+    restart: unless-stopped
+    env_file: /opt/cbot/.env
+    environment:
+      DATA_DIR: /data
+      TZ: Europe/Lisbon
+    volumes:
+      - /opt/cbot/data/core:/data
+    # Never publish this port to the internet directly: put a TLS reverse proxy
+    # in front (deploy/nginx). If the proxy runs on another machine, bind to
+    # the private address it reaches this host on and let the firewall admit
+    # only that machine (deploy/firewall).
+    ports:
+      - "127.0.0.1:8790:8790"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 0.5
+    dns: &dns ["2606:4700:4700::1111", "2001:4860:4860::8888", "1.1.1.1"]
+
+  box:
+    build: ./box
+    image: cbot-box
+    container_name: cbot-box
+    hostname: cbot
+    restart: unless-stopped
+    # Only BOXD_TOKEN. The main .env must never be visible in here.
+    env_file: /opt/cbot/box.env
+    environment:
+      TZ: Europe/Lisbon
+      DISPLAY_IDLE_MIN: "15"
+    volumes:
+      - /opt/cbot/data/home:/home/bot
+    shm_size: 1g              # Chrome
+    init: false               # tini is the image's entrypoint
+    # sudo and apt need the default capabilities, so they stay; raw sockets and
+    # device nodes do not.
+    cap_drop: [NET_RAW, MKNOD]
+    pids_limit: 4096
+    mem_limit: 3500m
+    memswap_limit: 4500m
+    cpus: 2.0
+    stop_grace_period: 20s
+    dns: *dns
+
+networks:
+  default:
+    enable_ipv6: true
+    driver_opts:
+      # Pinned: the firewall rules match on this interface name and subnet.
+      com.docker.network.bridge.name: br-cbot
+    ipam:
+      config:
+        - subnet: "172.28.0.0/16"
+        # A private range, NATed by docker. For native IPv6 use a /80 taken
+        # from the host's routed /64 instead and block that /64 in the firewall.
+        - subnet: "fd00:cb07:1::/64"

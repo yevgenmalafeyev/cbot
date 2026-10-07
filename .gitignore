@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+box.env
+data/
+*.db
+*.log
+.DS_Store

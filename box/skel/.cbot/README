@@ -1,0 +1,3 @@
+setup.sh in this directory (if present and executable) is run as root every time
+the box container starts. System packages are lost when the image is rebuilt;
+append the install commands here so they are replayed.

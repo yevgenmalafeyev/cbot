@@ -1,0 +1,64 @@
+#!/bin/bash
+# Per-bot virtual screens. Each bot owns one X display (Xvnc + XFCE) that is
+# started on demand and stopped by boxd after it has been idle.
+#
+#   cbot-display ensure <N> <bot-home>   start display :N if it is not running
+#   cbot-display stop   <N>              stop it (Chrome gets a chance to save)
+#   cbot-display touch  <N>              mark it as in use
+#
+# Runs as the `bot` user. VNC listens on 5900+N without a password: the only
+# other host on the container network is core, which fronts it with one-time
+# links.
+set -u
+cmd=${1:?}; n=${2:?}
+run=/run/cbot
+pidfile=$run/display-$n.pid
+touchfile=$run/display-$n.touch
+
+alive() { [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
+
+case "$cmd" in
+ensure)
+    home=${3:?bot home required}
+    exec 9>"$run/display-$n.lock"; flock 9
+    # a server that is there but no longer answers is replaced, not trusted
+    if alive && ! xdpyinfo -display ":$n" >/dev/null 2>&1; then
+        kill "$(cat "$pidfile")" 2>/dev/null; sleep 1; rm -f "$pidfile"
+    fi
+    if ! alive; then
+        rm -f "/tmp/.X$n-lock" "/tmp/.X11-unix/X$n"
+        mkdir -p "$home/chrome"
+        setsid Xvnc ":$n" -geometry "${CBOT_GEOMETRY:-1280x800}" -depth 24 \
+            -rfbport $((5900 + n)) -SecurityTypes None -AlwaysShared \
+            -AcceptSetDesktopSize=0 -desktop "cbot-$n" \
+            >"$run/display-$n.log" 2>&1 9>&- &
+        echo $! >"$pidfile"
+        for _ in $(seq 1 50); do xdpyinfo -display ":$n" >/dev/null 2>&1 && break; sleep 0.2; done
+        if ! xdpyinfo -display ":$n" >/dev/null 2>&1; then
+            echo "display :$n failed to start" >&2; cat "$run/display-$n.log" >&2; exit 1
+        fi
+        # The subshell drops the lock descriptor first: the desktop session lives
+        # for hours and anything still holding fd 9 would block every later call.
+        ( exec 9>&-; cd "$HOME" || exit 1
+          DISPLAY=":$n" CBOT_BOT_HOME="$home" exec setsid dbus-run-session -- startxfce4 >"$run/xfce-$n.log" 2>&1 ) &
+        sleep 4
+    fi
+    touch "$touchfile"
+    echo "display :$n ready"
+    ;;
+stop)
+    if alive; then
+        # Let Chrome flush cookies and its session before the X server goes away.
+        pkill -TERM -f -- "--user-data-dir=.*--cbot-display=$n( |\$)" 2>/dev/null
+        sleep 3
+        kill "$(cat "$pidfile")" 2>/dev/null
+    fi
+    rm -f "$pidfile" "$touchfile"
+    ;;
+touch)
+    touch "$touchfile"
+    ;;
+*)
+    echo "usage: cbot-display ensure|stop|touch <N> [bot-home]" >&2; exit 2
+    ;;
+esac

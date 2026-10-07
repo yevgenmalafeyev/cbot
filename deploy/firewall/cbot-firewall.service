@@ -1,0 +1,17 @@
+[Unit]
+Description=Confine cbot containers to internet-only egress
+# Docker rebuilds its chains on start and puts its own FORWARD rules first;
+# ours must be re-inserted above them every time.
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+# PROXY_HOST, EXIT_PROXY_HOST, EXIT_PROXY_PORT, HOST_V6_PREFIX (all optional)
+EnvironmentFile=-/etc/default/cbot-firewall
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cbot-container-egress.sh
+
+[Install]
+WantedBy=multi-user.target

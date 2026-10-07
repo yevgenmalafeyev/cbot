@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cbot</title><link rel="stylesheet" href="/assets/base.css">
+<script src="/assets/telegram-web-app.js"></script>
+<style>
+  .card { margin-top: 1rem; }
+  #bots:not(:empty) { margin-bottom: 1.2rem; }
+  h2:first-child { margin-top: 0; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 1.2rem 0 .4rem; }
+  .row { display: flex; gap: .6rem; align-items: center; padding: .5rem 0; border-top: 1px solid var(--line); }
+  .row span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .row small { color: var(--muted); white-space: nowrap; }
+  .row span small { display: block; white-space: normal; }
+  .row button { width: auto; padding: .4rem .8rem; font-size: .9rem; }
+  [hidden] { display: none !important; }
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1 id="name">…</h1>
+<p id="note" hidden>Open this from the bot's chat in Telegram.</p>
+<div id="main" hidden>
+  <h2 id="bh" hidden>Bots</h2><div id="bots"></div>
+  <button id="screen" type="button">🖥 Open screen</button>
+  <h2 id="wh" hidden>Waiting for you</h2><div id="waiting"></div>
+  <h2 id="th" hidden>Tasks</h2><div id="tasks"></div>
+</div>
+</div></div>
+<script>
+  const tg = window.Telegram?.WebApp;
+  const base = location.pathname.replace(/\/$/, '');
+  const auth = `?tg=${encodeURIComponent(tg?.initData || '')}`;
+  const $ = (id) => document.getElementById(id);
+  const ICON = { help: '🖥', secret: '🔑', approval: '✋' };
+  const BUTTON = { help: 'Open', secret: 'Enter' };
+
+  function row(text, right) {
+    const el = document.createElement('div');
+    el.className = 'row';
+    el.appendChild(document.createElement('span')).textContent = text;
+    if (right) el.appendChild(right);
+    return el;
+  }
+  async function refresh() {
+    const r = await fetch(`${base}/state${auth}`, { cache: 'no-store' }).catch(() => null);
+    if (!r) return;
+    if (!r.ok) { $('name').textContent = 'cbot'; $('main').hidden = true; $('note').hidden = false; return; }
+    const s = await r.json();
+    $('name').textContent = s.name;
+    $('main').hidden = false;
+    $('bh').hidden = !s.bots.length;
+    $('bots').replaceChildren(...s.bots.map((b) => {
+      const open = document.createElement('button');
+      open.textContent = 'Open';
+      open.onclick = () => tg.openTelegramLink(`https://t.me/${b.username}`);
+      const el = row(b.name, open);
+      el.firstChild.appendChild(document.createElement('small')).textContent = b.about;
+      return el;
+    }));
+    $('wh').hidden = !s.waiting.length;
+    $('waiting').replaceChildren(...s.waiting.map((w) => {
+      let right;
+      if (w.url) {
+        right = document.createElement('button');
+        right.textContent = BUTTON[w.kind];
+        right.onclick = () => { location.href = w.url; };
+      } else {
+        right = document.createElement('small');
+        right.textContent = 'answer in chat';
+      }
+      return row(`${ICON[w.kind] || '❓'} ${w.text}`, right);
+    }));
+    $('th').hidden = !s.tasks.length;
+    $('tasks').replaceChildren(...s.tasks.map((t) => {
+      const st = document.createElement('small');
+      st.textContent = t.status;
+      return row(`#${t.id} ${t.title}`, st);
+    }));
+  }
+  $('screen').onclick = async () => {
+    const r = await fetch(`${base}/screen${auth}`, { method: 'POST' }).catch(() => null);
+    if (r?.ok) location.href = (await r.json()).url;
+  };
+  tg?.ready();
+  tg?.expand();
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body></html>

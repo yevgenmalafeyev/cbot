@@ -1,0 +1,18 @@
+#!/bin/bash
+# Chrome with the calling bot's own profile. CBOT_BOT_HOME and DISPLAY come from
+# the bot's desktop session (or from the Claude run environment).
+#
+# --no-sandbox: Chrome's namespace sandbox needs privileges this container does
+# not get (they would widen the path to the host). The container is the
+# boundary. --test-type only hides the resulting warning bar.
+home=${CBOT_BOT_HOME:-/home/bot/bots/main}
+n=${DISPLAY#:}; n=${n%%.*}
+# With the office exit configured, all browser traffic goes through the local
+# exit switch, which picks the office or the direct route per connection.
+[ -e /run/cbot/exitd.on ] && CBOT_PROXY=${CBOT_PROXY:-http://127.0.0.1:3128}
+exec /usr/bin/google-chrome-stable \
+    --user-data-dir="$home/chrome" --cbot-display="$n" \
+    --no-sandbox --test-type --no-first-run --no-default-browser-check \
+    --password-store=basic --disable-dev-shm-usage --start-maximized \
+    --hide-crash-restore-bubble \
+    ${CBOT_PROXY:+--proxy-server="$CBOT_PROXY"} "$@"
