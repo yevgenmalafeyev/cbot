@@ -30,7 +30,7 @@ ensure)
         mkdir -p "$home/chrome"
         setsid Xvnc ":$n" -geometry "${CBOT_GEOMETRY:-1280x800}" -depth 24 \
             -rfbport $((5900 + n)) -SecurityTypes None -AlwaysShared \
-            -AcceptSetDesktopSize=0 -desktop "cbot-$n" \
+            -AcceptSetDesktopSize=0 -SendPrimary=0 -desktop "cbot-$n" \
             >"$run/display-$n.log" 2>&1 9>&- &
         echo $! >"$pidfile"
         for _ in $(seq 1 50); do xdpyinfo -display ":$n" >/dev/null 2>&1 && break; sleep 0.2; done

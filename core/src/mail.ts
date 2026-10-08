@@ -239,7 +239,27 @@ async function read(bot: BotRow, a: AccountRow, id: string, saveAttachments: boo
   return lines.join('\n');
 }
 
-async function modify(a: AccountRow, ids: string[], action: string): Promise<string> {
+/** The owner's own Gmail labels. System labels (INBOX, TRASH, SPAM ...) are left out: those have their own actions and approvals. */
+async function gmailLabels(a: AccountRow): Promise<{ id: string; name: string }[]> {
+  if (a.kind !== 'gmail') throw new Error('Labels are only available on Gmail accounts.');
+  const list = await gmail(a, '/labels');
+  return (list.labels ?? []).filter((l: any) => l.type === 'user').map((l: any) => ({ id: l.id, name: l.name }));
+}
+
+/** Add or remove one label, by name ("Clients/UPS" for a nested one). A label that does not exist yet is created when it is added. */
+async function label(a: AccountRow, ids: string[], action: string, name: string): Promise<string> {
+  if (!name || name.length > 200) throw new Error('Give the label name in "label".');
+  const labels = await gmailLabels(a);
+  let found = labels.find((l) => l.name.toLowerCase() === name.toLowerCase());
+  if (!found && action === 'remove_label') throw new Error(`No label "${name}". Existing labels: ${labels.map((l) => l.name).join(', ') || 'none'}.`);
+  const created = !found;
+  found ??= await gmail(a, '/labels', { method: 'POST', body: { name } }) as { id: string; name: string };
+  await gmail(a, '/messages/batchModify', { method: 'POST', body: { ids, ...(action === 'add_label' ? { addLabelIds: [found.id] } : { removeLabelIds: [found.id] }) } });
+  return `Done: ${action} "${found.name}" on ${ids.length} message(s).${created ? ' The label did not exist and was created.' : ''}`;
+}
+
+async function modify(a: AccountRow, ids: string[], action: string, labelName = ''): Promise<string> {
+  if (action === 'add_label' || action === 'remove_label') return label(a, ids, action, labelName.trim());
   if (a.kind === 'gmail') {
     const change: Record<string, { add?: string[]; remove?: string[] }> = {
       mark_read: { remove: ['UNREAD'] }, mark_unread: { add: ['UNREAD'] }, archive: { remove: ['INBOX'] },
@@ -382,7 +402,11 @@ export async function mailTool(ctx: RunContext, bot: BotRow, task: TaskRow | und
     case 'mail_modify':
     {
       const acc = account(bot.id, a.account);
-      return { result: await modify(acc, messageIds(acc, a.ids), String(a.action)) };
+      return { result: await modify(acc, messageIds(acc, a.ids), String(a.action), String(a.label ?? '')) };
+    }
+    case 'mail_labels': {
+      const labels = await gmailLabels(account(bot.id, a.account));
+      return { result: labels.length ? labels.map((l) => l.name).sort().join('\n') : 'No labels yet.' };
     }
 
     // The two below never act directly: the owner approves the exact content first.

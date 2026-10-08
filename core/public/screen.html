@@ -27,6 +27,8 @@
   @media (pointer: coarse) { #kbd { display: block; } }
   #screen { flex: 1; min-height: 0; touch-action: none; }
   #screen canvas { border-radius: 10px; }
+  /* off-screen: only there to receive the browser's own paste */
+  #sink { position: fixed; left: -100px; top: 0; width: 1px; height: 1px; opacity: 0; }
   #keys { display: none; gap: .35rem; padding: .45rem .5rem; align-items: center; overflow-x: auto; }
   #keys.on { display: flex; }
   #keys input { flex: 1 1 8rem; min-width: 7rem; margin: 0; padding: .4rem .8rem; border-radius: 999px; background: #000; color: #eceef1; border-color: rgba(255, 255, 255, .16); }
@@ -36,12 +38,14 @@
 <header>
   <span id="reason"></span>
   <span id="state">connecting…</span>
+  <button class="ghost" id="paste" type="button" title="Type this device's clipboard into the bot's screen">Paste</button>
   <button class="ghost" id="kbd" type="button">Keyboard</button>
   <form method="post" action="/h/{{token}}/cancel" class="ask" id="cancel" hidden><button class="ghost" type="submit">Cancel</button></form>
   <form method="post" action="/h/{{token}}/done" class="ask" id="done" hidden><button type="submit">I'm done, go on</button></form>
   <button class="ghost" id="close" type="button" hidden>Close</button>
 </header>
 <div id="screen"></div>
+<textarea id="sink" tabindex="-1" aria-hidden="true"></textarea>
 <div id="keys">
   <input id="text" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type, then Send">
   <button class="send" data-act="send" type="button">Send</button>
@@ -112,6 +116,7 @@
     rfb.scaleViewport = true;      // fit the 1280x800 desktop into whatever screen this is
     rfb.resizeSession = false;     // the bot relies on a fixed resolution
     rfb.addEventListener('connect', () => { state.textContent = ''; rfb.focus(); });
+    rfb.addEventListener('clipboard', (e) => copied?.(e.detail.text));
     rfb.addEventListener('disconnect', () => {
       state.textContent = 'disconnected, retrying…';
       setTimeout(connect, 3000);
@@ -122,11 +127,24 @@
   // Phones have no physical keyboard and noVNC cannot summon the on-screen one
   // reliably, so text goes through a normal input and is replayed as key events.
   const keysym = (ch) => { const cp = ch.codePointAt(0); return cp < 0x100 ? cp : 0x01000000 | cp; };
+  const type = (text) => { for (const ch of text.replace(/\r\n?/g, '\n')) rfb.sendKey(ch === '\n' ? 0xff0d : keysym(ch)); };
   function sendText() {
-    for (const ch of input.value) rfb.sendKey(ch === '\n' ? 0xff0d : keysym(ch));
+    type(input.value);
     input.value = '';
     input.focus();
   }
+  // This button types this device's clipboard as key presses, so it works in
+  // any field and never lands in the bot's clipboard. Where the browser will
+  // not hand the clipboard over, the text field takes a native paste.
+  document.getElementById('paste').onclick = async () => {
+    let text;
+    try { text = await navigator.clipboard.readText(); } catch {}
+    if (text) { type(text); rfb.focus(); return; }
+    if (text === '') { state.textContent = 'clipboard is empty'; setTimeout(() => { state.textContent = ''; }, 2500); return; }
+    document.getElementById('keys').classList.add('on');
+    input.placeholder = 'Paste here, then Send';
+    input.focus();
+  };
   document.getElementById('kbd').onclick = () => {
     const on = document.getElementById('keys').classList.toggle('on');
     if (on) input.focus(); else rfb.focus();
@@ -140,6 +158,65 @@
       input.type = input.type === 'password' ? 'text' : 'password';
       b.textContent = input.type === 'password' ? 'Show' : 'Hide';
     }
+  });
+  // One clipboard for both machines. noVNC does not bridge them: Cmd+V arrives
+  // on the bot's screen as Super+V and does nothing, Ctrl+V pastes the bot's own
+  // clipboard. So this device's copy, cut and paste shortcuts are taken here:
+  // paste hands the local clipboard to the bot's screen and presses Ctrl+V
+  // there, copy and cut press Ctrl+C / Ctrl+X there and bring the result back.
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+  const sink = document.getElementById('sink');
+  const CTRL = 0xffe3;
+  let copied;      // waits for the bot's screen to announce what was just copied
+  let unpasted;
+  function chord(ch) {
+    // the Cmd that is still held would turn this into Super+Ctrl+key
+    rfb.sendKey(0xffeb, 'MetaLeft', false);
+    rfb.sendKey(0xffec, 'MetaRight', false);
+    rfb.sendKey(CTRL, 'ControlLeft', true);
+    rfb.sendKey(ch.charCodeAt(0), 'Key' + ch.toUpperCase());
+    rfb.sendKey(CTRL, 'ControlLeft', false);
+  }
+  function copyBack() {
+    const text = new Promise((resolve, reject) => {
+      const t = setTimeout(() => { copied = null; reject(new Error('nothing was copied')); }, 1500);
+      copied = (s) => { clearTimeout(t); copied = null; resolve(s); };
+    });
+    text.catch(() => {});
+    // Safari only lets the clipboard be written from inside the key press, so
+    // it is promised the text now; elsewhere it is written when it arrives.
+    const late = () => text.then((s) => navigator.clipboard.writeText(s)).catch(() => {});
+    try {
+      navigator.clipboard.write([new ClipboardItem({ 'text/plain': text.then((s) => new Blob([s], { type: 'text/plain' })) })]).catch(late);
+    } catch { late(); }
+  }
+  window.addEventListener('keydown', (e) => {
+    if (!rfb || e.target === input || e.altKey || e.shiftKey || (mac ? !e.metaKey || e.ctrlKey : !e.ctrlKey || e.metaKey)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'c' || k === 'x') {
+      copyBack();
+      if (!mac) return;            // Ctrl+C is already what the bot's screen expects
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      chord(k);
+    } else if (k === 'v') {
+      // Not prevented: with the focus moved, the browser pastes into the sink
+      // and the text can be read from that event without asking for permission.
+      e.stopImmediatePropagation();
+      sink.value = '';
+      sink.focus();
+      clearTimeout(unpasted);
+      unpasted = setTimeout(() => rfb.focus(), 500);
+    }
+  }, true);
+  sink.addEventListener('paste', (e) => {
+    e.preventDefault();
+    clearTimeout(unpasted);
+    const text = e.clipboardData.getData('text/plain');
+    rfb.focus();
+    if (!text) return;
+    rfb.clipboardPasteFrom(text);
+    setTimeout(() => chord('v'), 60);   // after the bot's screen has taken the clipboard
   });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); if (input.value) sendText(); else rfb.sendKey(0xff0d); }
