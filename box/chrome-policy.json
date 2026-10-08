@@ -1,5 +1,6 @@
 {
-  "RestoreOnStartup": 1,
+  "RestoreOnStartup": 5,
+  "HighEfficiencyModeEnabled": true,
   "DefaultBrowserSettingEnabled": false,
   "MetricsReportingEnabled": false,
   "PromotionsEnabled": false,

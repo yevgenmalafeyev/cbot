@@ -153,7 +153,9 @@ if (ROLE === 'task') {
   coreTool('mail_read', 'Read one message in full (headers, text body, attachment list).',
     { account: acct, id: z.string(), save_attachments: z.boolean().optional().describe('true: also save the attachments to this machine and return their paths') });
   coreTool('mail_modify', 'Reversible housekeeping on messages.',
-    { account: acct, ids: z.array(z.string()).min(1).max(100), action: z.enum(['mark_read', 'mark_unread', 'archive', 'unarchive', 'star', 'unstar']) });
+    { account: acct, ids: z.array(z.string()).min(1).max(100), action: z.enum(['mark_read', 'mark_unread', 'archive', 'unarchive', 'star', 'unstar', 'add_label', 'remove_label']),
+      label: z.string().optional().describe('For add_label / remove_label (Gmail accounts only): the label name, "Parent/Child" for a nested one. add_label creates a label that does not exist yet.') });
+  coreTool('mail_labels', 'List the labels of a connected Gmail account.', { account: acct });
   coreTool('mail_send',
     'Send an email from a connected account. The owner is shown the exact message with Approve/Deny and it is sent only after they approve; this call blocks until then and returns the outcome. Do not call request_approval for it separately.',
     { account: acct, to: z.string().describe('Comma-separated recipients'), cc: z.string().optional(), bcc: z.string().optional(), subject: z.string(), body: z.string().describe('Plain text'),

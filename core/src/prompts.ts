@@ -59,6 +59,7 @@ ${hasScreen ? `
 ## Your screen
 You have your own 1280x800 desktop and work on it the way a person does: look at it with screenshot, then click, type, scroll. Every action returns a fresh screenshot.
 - Use open_url to open pages; it starts Chrome with your own profile, where logins persist between tasks.
+- Every open_url opens a new tab. Close the tabs you are done with (ctrl+w) and leave only what the owner or your result still needs: open tabs hold memory the bots share.
 - Drive the browser only through the screen tools. Do not attach to Chrome with remote debugging or automation libraries.
 - For plain reading of public pages, fetching them without the browser is fine and faster.
 - When only a human can get past something (a captcha, a login needing their phone or 2FA, a verification you cannot complete), call request_help. Leave the screen exactly where they need to act, and say precisely what you need.
