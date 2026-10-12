@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   instructions  TEXT NOT NULL,
   model         TEXT NOT NULL,
   needs_screen  INTEGER NOT NULL,
-  status        TEXT NOT NULL,       -- queued | running | done | failed | cancelled | interrupted
+  status        TEXT NOT NULL,       -- queued | running | waiting | done | failed | cancelled | interrupted
   session_id    TEXT,
   resume        INTEGER NOT NULL DEFAULT 0,   -- 1: continue session_id instead of starting over
   status_msg_id INTEGER,
@@ -86,9 +86,20 @@ CREATE TABLE IF NOT EXISTS events (   -- notes for a bot's chat session, deliver
 `);
 
 export interface BotRow { id: number; slug: string; name: string; token_enc: Buffer | null; instructions: string; session_id: string | null; created_at: number }
-for (const col of ['unattended INTEGER NOT NULL DEFAULT 0', 'quiet INTEGER NOT NULL DEFAULT 0']) {
+for (const col of ['unattended INTEGER NOT NULL DEFAULT 0', 'quiet INTEGER NOT NULL DEFAULT 0', 'resume_note TEXT', 'auto_approve INTEGER NOT NULL DEFAULT 0']) {
   try { db.exec(`ALTER TABLE tasks ADD COLUMN ${col}`); } catch { /* already there */ }
 }
+
+// Full-text index over finished tasks (brief and result), so a bot can recall
+// what it did and found earlier. Rebuilt row by row as tasks finish.
+let fts = true;
+try {
+  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS task_fts USING fts5(task_id UNINDEXED, bot_id UNINDEXED, title, body, tokenize='unicode61 remove_diacritics 2')`);
+} catch (e: any) {
+  fts = false;
+  console.error('[db] full-text search unavailable:', e.message);
+}
+export const hasFts = () => fts;
 
 export interface TaskRow {
   id: number; bot_id: number; title: string; instructions: string; model: string; needs_screen: number;
@@ -98,6 +109,10 @@ export interface TaskRow {
   unattended: number;
   /** set by the task itself: it found nothing the owner needs to hear about */
   quiet: number;
+  /** what to tell a paused (waiting) task when it is resumed: the owner's answer */
+  resume_note: string | null;
+  /** 1: the owner approved every further approval request of this task in advance */
+  auto_approve: number;
 }
 export interface ScheduleRow {
   id: number; bot_id: number; title: string; instructions: string; cron: string | null; model: string; needs_screen: number;
@@ -155,6 +170,43 @@ export const tasks = {
   byStatus: (status: string) => db.prepare('SELECT * FROM tasks WHERE status = ? ORDER BY id').all(status) as TaskRow[],
   recent: (botId: number, limit = 15) =>
     db.prepare('SELECT * FROM tasks WHERE bot_id = ? ORDER BY id DESC LIMIT ?').all(botId, limit) as TaskRow[],
+
+  // ------------------------------------------------------------ recall (FTS)
+  /** (Re)index one finished task. */
+  index(t: TaskRow) {
+    if (!fts) return;
+    db.prepare('DELETE FROM task_fts WHERE task_id = ?').run(t.id);
+    db.prepare('INSERT INTO task_fts (task_id, bot_id, title, body) VALUES (?, ?, ?, ?)')
+      .run(t.id, t.bot_id, t.title, `${t.instructions}\n\n${t.result ?? ''}`);
+  },
+  /** Index finished tasks that are not in the index yet (first start after the upgrade). */
+  indexMissing() {
+    if (!fts) return;
+    const rows = db.prepare(`SELECT * FROM tasks WHERE status IN ('done', 'failed') AND id NOT IN (SELECT task_id FROM task_fts)`).all() as TaskRow[];
+    for (const t of rows) tasks.index(t);
+    if (rows.length) console.log(`[db] indexed ${rows.length} earlier task(s) for recall`);
+  },
+  /**
+   * Full-text search over a bot's finished tasks. Words are matched as prefixes,
+   * all of them must occur. Falls back to a plain substring match when the
+   * query cannot be turned into an FTS expression or FTS is unavailable.
+   */
+  search(botId: number, query: string, limit = 8): { task: TaskRow; snippet: string }[] {
+    const words = query.replace(/["'*^:()]/g, ' ').split(/\s+/).filter(Boolean).slice(0, 12);
+    if (!words.length) return [];
+    if (fts) {
+      try {
+        const match = words.map((w) => `"${w}"*`).join(' ');
+        const rows = db.prepare(`SELECT task_id, snippet(task_fts, 3, '[', ']', '…', 24) AS snippet FROM task_fts
+          WHERE task_fts MATCH ? AND bot_id = ? ORDER BY rank LIMIT ?`).all(match, botId, limit) as { task_id: number; snippet: string }[];
+        return rows.map((r) => ({ task: tasks.get(r.task_id)!, snippet: r.snippet })).filter((r) => r.task);
+      } catch { /* odd query: fall through to LIKE */ }
+    }
+    const like = `%${words[0]}%`;
+    const rows = db.prepare(`SELECT * FROM tasks WHERE bot_id = ? AND status IN ('done', 'failed') AND (title LIKE ? OR instructions LIKE ? OR result LIKE ?) ORDER BY id DESC LIMIT ?`)
+      .all(botId, like, like, like, limit) as TaskRow[];
+    return rows.map((t) => ({ task: t, snippet: (t.result ?? t.instructions).slice(0, 160) }));
+  },
 };
 
 export const schedules = {

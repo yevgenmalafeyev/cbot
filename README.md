@@ -34,6 +34,19 @@ exactly one Telegram account: yours.
   its own Telegram identity, memory, Chrome profile and screen.
 - **Voice and files.** Voice messages are transcribed (optional, Groq); files
   go both ways.
+- **Memory that stays useful.** Each bot keeps a short memory file with a size
+  limit, consolidates it when it grows, and can search every task it ever ran
+  (full-text, in SQLite). After a task, a cheap model reviews what happened
+  and saves what should be remembered: facts into the memory file, recurring
+  procedures into skill files the next task can load.
+- **Does not block the queue.** A task that waits hours for your answer gives
+  up its slot when other work is queued, and resumes with your answer. For
+  approvals you can tap "approve this and the rest of this task". Scheduled
+  and mail-triggered runs stop waiting after 12 hours; an unanswered approval
+  counts as denied.
+- **Writes plainly.** Everything a bot says to you follows Simplified
+  Technical English: short active sentences, one idea each, plain words, every
+  fact and hedge kept.
 
 ## How it is built
 
@@ -104,7 +117,9 @@ Then set up the firewall and the reverse proxy as described in
 Main settings (`.env.example` has them all): `TELEGRAM_BOT_TOKEN`,
 `OWNER_TG_ID`, `PUBLIC_URL`, `MASTER_KEY`, `BOXD_TOKEN`. Optional:
 `GROQ_API_KEY` (voice), `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (Gmail),
-`TZ`, `FRONT_MODEL`, `TASK_MODEL`.
+`TZ`, `FRONT_MODEL`, `TASK_MODEL`, and the tuning knobs `MEMORY_CHAR_LIMIT`,
+`MEMORY_REVIEW`, `MEMORY_REVIEW_MODEL`, `UNATTENDED_ANSWER_HOURS`,
+`PARK_AFTER_SECONDS`, `SPILL_CHARS`.
 
 ## Read this before you run it
 
@@ -124,9 +139,13 @@ and it is also the risk.
 - A screen-driven agent cannot be technically prevented from clicking "Send"
   on a web page; for actions in the browser, approvals are a rule the agent
   follows.
-- Text the agent reads (pages, mail) can try to steer it. The prompts tell it
-  to treat such text as data, and the firewall limits what a steered agent
-  can reach, but neither is a guarantee.
+- Text the agent reads (pages, mail) can try to steer it. Everything third
+  parties wrote that passes through `core` (mail bodies and headers, search
+  snippets, earlier task results) reaches the model inside a fence with a
+  one-time nonce, with invisible characters stripped and fake tags or control
+  lines defanged, and the prompts say the fence means data. Text seen on the
+  screen or fetched directly is not fenced, and the firewall limits what a
+  steered agent can reach, but neither is a guarantee.
 - The firewall in `deploy/firewall` is part of the design, not an extra.
   Without it the box can reach your host and your private network.
 - There are no backups. Everything is under `/opt/cbot/data` on the host.

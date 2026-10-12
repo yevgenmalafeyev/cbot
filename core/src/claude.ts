@@ -4,13 +4,15 @@ import { box, RunExit } from './box.js';
 import { BotRow, bots, newToken } from './db.js';
 import { config } from './config.js';
 
-export interface RunContext { botId: number; role: 'front' | 'task'; taskId: number | null }
+export type Role = 'front' | 'task' | 'review';
+export interface RunContext { botId: number; role: Role; taskId: number | null }
 /** token -> who is calling; lives exactly as long as the Claude process */
 export const runTokens = new Map<string, RunContext>();
 
 export interface ClaudeSpec {
   runId: string;
-  role: 'front' | 'task';
+  /** review: a memory pass over a finished task; it may only read and edit files */
+  role: Role;
   bot: BotRow;
   taskId?: number;
   model: string;
@@ -34,6 +36,8 @@ export interface ClaudeResult {
 
 // The chat-facing session only dispatches; work happens in tasks.
 const FRONT_DISALLOWED = 'Bash,BashOutput,KillShell,Task,Agent,NotebookEdit';
+// The review pass edits the memory file and skills, nothing else.
+const REVIEW_DISALLOWED = `${FRONT_DISALLOWED},WebSearch,WebFetch,TodoWrite`;
 
 const LIMIT_RE = /usage limit|hit your limit|limit reached|rate limit|out of extra usage/i;
 
@@ -50,7 +54,7 @@ export async function runClaude(spec: ClaudeSpec): Promise<ClaudeResult> {
   const display = bots.display(spec.bot);
   const sessionId = spec.sessionId ?? crypto.randomUUID();
 
-  const mcp = {
+  const mcp = spec.role === 'review' ? { mcpServers: {} } : {
     mcpServers: {
       cbot: {
         command: 'node',
@@ -73,7 +77,7 @@ export async function runClaude(spec: ClaudeSpec): Promise<ClaudeResult> {
     '--dangerously-skip-permissions',
     '--strict-mcp-config', '--mcp-config', JSON.stringify(mcp),
     '--append-system-prompt', spec.systemPrompt,
-    ...(spec.role === 'front' ? ['--disallowedTools', FRONT_DISALLOWED] : []),
+    ...(spec.role === 'front' ? ['--disallowedTools', FRONT_DISALLOWED] : spec.role === 'review' ? ['--disallowedTools', REVIEW_DISALLOWED] : []),
     ...(spec.resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
   ];
 
@@ -142,6 +146,7 @@ export function describeEvent(ev: any): string | null {
       case 'type_text': case 'press_key': line = '⌨️ typing'; break;
       case 'type_secret': line = `🔑 entering ${i.name ?? 'a secret'}`; break;
       case 'request_help': case 'ask_user': case 'request_approval': case 'request_secret': line = '⏸ waiting for you'; break;
+      case 'search_tasks': case 'read_task': line = '🧠 recalling earlier work'; break;
       default: line = name.startsWith('mail_') ? '✉️ working with mail' : '⚙️ working';
     }
   }

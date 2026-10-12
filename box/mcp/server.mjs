@@ -74,6 +74,11 @@ coreTool('request_secret',
 
 coreTool('mail_accounts', 'List the mail accounts connected to this bot.', {});
 
+coreTool('search_tasks',
+  'Recall earlier tasks of this bot by words in their title, brief or result (full-text, prefixes match). Use it before redoing work or asking the owner what was already done or found.',
+  { query: z.string().describe('A few words, e.g. "invoice acme october"'), max: z.number().int().min(1).max(20).optional() });
+coreTool('read_task', 'Show one earlier task in full: brief, status and result.', { task_id: z.number().int() });
+
 // ----------------------------------------------------------------- front tools
 if (ROLE === 'front') {
   coreTool('start_task',
@@ -164,10 +169,10 @@ if (ROLE === 'task') {
   coreTool('mail_trash', 'Move messages to Trash. Asks the owner for approval first and blocks until they answer.',
     { account: acct, ids: z.array(z.string()).min(1).max(100), summary: z.string().describe('What these messages are, shown to the owner') });
   coreTool('ask_user',
-    'Ask the owner a question you cannot resolve yourself and wait for the answer. Blocks until they reply (possibly hours). Other tasks keep running meanwhile.',
+    'Ask the owner a question you cannot resolve yourself and wait for the answer. Blocks until they reply (possibly hours); meanwhile your session may be paused and resumed with the answer. Other tasks keep running.',
     { question: z.string(), options: z.array(z.string().max(60)).max(5).optional().describe('Likely answers shown as buttons, your recommendation first; the owner can still type something else') });
   coreTool('request_approval',
-    'REQUIRED before: spending money; sending email/messages or submitting forms in the owner\'s name; posting anything publicly; deleting data or making irreversible changes in their accounts. Shows the owner the exact action with Approve/Deny buttons and blocks until they tap. Returns "approved" or "denied" (with an optional note). Never proceed without "approved".',
+    'REQUIRED before: spending money; sending email/messages or submitting forms in the owner\'s name; posting anything publicly; deleting data or making irreversible changes in their accounts. Shows the owner the exact action with Approve/Deny buttons and blocks until they tap. Returns "approved" or "denied" (with an optional note). Never proceed without "approved". The owner may approve all further requests of this task in advance; you still ask every time.',
     { action: z.string().describe('One line: what you are about to do'),
       details: z.string().describe('The full content: draft text, recipient, amount, what gets deleted') });
 }

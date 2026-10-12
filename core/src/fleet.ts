@@ -9,7 +9,7 @@ import { InlineKeyboard } from 'grammy';
 import { config } from './config.js';
 import { db, bots, decrypt, encrypt, events, links, tasks, now, BotRow, LinkRow, TaskRow } from './db.js';
 import { box } from './box.js';
-import { createApproval, createTask, enqueueFront, quoted, APPROVAL_SENT } from './agent.js';
+import { createApproval, createTask, enqueueFront, APPROVAL_SENT } from './agent.js';
 import { RunContext } from './claude.js';
 import * as tg from './telegram.js';
 
@@ -119,12 +119,12 @@ export async function fleetTool(ctx: RunContext, bot: BotRow, tool: string, a: a
   return undefined;
 }
 
-/** Tell the bot that handed a task over how it ended. */
-export function noteDelegated(t: TaskRow, ok: boolean, body: string): void {
+/** Tell the bot that handed a task over how it ended. `note` is the fenced result, already cut. */
+export function noteDelegated(t: TaskRow, ok: boolean, note: string): void {
   const origin = (t as TaskRow & { origin_bot_id?: number | null }).origin_bot_id;
   if (!origin) return;
   const worker = bots.get(t.bot_id);
-  events.add(origin, `The task "${t.title}" you handed to "${worker?.name}" ${ok ? 'finished' : 'FAILED'}; the owner received this in that bot's chat:\n${quoted(body.slice(0, 2000))}`);
+  events.add(origin, `The task "${t.title}" you handed to "${worker?.name}" ${ok ? 'finished' : 'FAILED'}; the owner received this in that bot's chat:\n${note}`);
 }
 
 /** A plain but presentable icon when the creating bot supplied none: the initial on a colour derived from the slug. */

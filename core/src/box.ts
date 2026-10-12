@@ -24,6 +24,9 @@ export const box = {
   ensureDisplay: (n: number, home: string) => call('POST', '/display/ensure', { n, home }),
   touchDisplay: (n: number) => call('POST', '/display/touch', { n }).catch(() => {}),
   stat: (path: string): Promise<{ size: number; isFile: boolean }> => call('GET', `/stat?path=${encodeURIComponent(path)}`),
+  /** The bot's own and the shared skills, one line each. */
+  skills: (home: string): Promise<{ skills: { name: string; scope: 'own' | 'shared'; path: string; description: string }[] }> =>
+    call('GET', `/skills?home=${encodeURIComponent(home)}`),
 
   async putFile(path: string, data: Buffer): Promise<void> {
     const res = await fetch(`${config.boxdUrl}/file?path=${encodeURIComponent(path)}`, { method: 'PUT', headers: auth, body: new Uint8Array(data) });

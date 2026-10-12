@@ -151,6 +151,26 @@ const routes = {
     const st = fs.statSync(p);
     send(res, 200, { size: st.size, isFile: st.isFile() });
   },
+
+  // The skills a bot can load: its own folder and the shared one. One line
+  // each (name and description), for the index core puts into the prompt.
+  'GET /skills': async (_req, res, url) => {
+    const home = safePath(url.searchParams.get('home'));
+    const out = [];
+    for (const [scope, dir] of [['own', `${home}/skills`], ['shared', `${BOT_HOME}/shared/skills`]]) {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch { continue; }
+      for (const name of names.sort().slice(0, 60)) {
+        if (!/^[\w][\w.-]{0,63}$/.test(name)) continue;
+        const file = `${dir}/${name}/SKILL.md`;
+        let head = '';
+        try { if (!fs.statSync(file).isFile()) continue; head = fs.readFileSync(file, 'utf8').slice(0, 2000); } catch { continue; }
+        const description = head.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#') && !l.startsWith('---')) ?? '';
+        out.push({ name, scope, path: file, description: description.slice(0, 200) });
+      }
+    }
+    send(res, 200, { skills: out });
+  },
 };
 
 http.createServer(async (req, res) => {

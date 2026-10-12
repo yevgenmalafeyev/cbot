@@ -8,12 +8,47 @@ import { typeOnDisplay } from './vnc.js';
 import { bots, events, links, requests, schedules, secrets, tasks, RequestRow, TaskRow, now } from './db.js';
 import { describe as describeSchedule, localTime, nextCron, parseLocal } from './schedule.js';
 import { runClaude, describeEvent, RunContext } from './claude.js';
-import { frontPrompt, taskPrompt } from './prompts.js';
+import { frontPrompt, reviewPrompt, taskPrompt, Skill } from './prompts.js';
 import { execApproved, mailTool } from './mail.js';
 import { execFleet, fleetTool, noteDelegated } from './fleet.js';
+import { fence, neutralize } from './untrusted.js';
 import * as tg from './telegram.js';
 
 const log = (...a: unknown[]) => console.log('[agent]', ...a);
+
+// ================================================================== skills
+// The index of a bot's skills goes into every prompt; the folder is scanned at
+// most once a minute per bot.
+const skillCache = new Map<number, { at: number; list: Skill[] }>();
+async function skillsOf(bot: { id: number; slug: string } & Parameters<typeof bots.home>[0], fresh = false): Promise<Skill[]> {
+  const c = skillCache.get(bot.id);
+  if (c && !fresh && now() - c.at < 60_000) return c.list;
+  const list = await box.skills(bots.home(bot)).then((r) => r.skills.slice(0, 60), () => c?.list ?? []);
+  skillCache.set(bot.id, { at: now(), list });
+  return list;
+}
+
+// ================================================================== memory
+const memoryNagged = new Map<number, number>();
+
+/** Size of the bot's memory file in characters, or null when there is none. */
+async function memoryChars(bot: Parameters<typeof bots.home>[0]): Promise<number | null> {
+  try {
+    const chunks: Buffer[] = [];
+    for await (const c of await box.getFile(`${bots.home(bot)}/CLAUDE.md`)) chunks.push(c as Buffer);
+    return Buffer.concat(chunks).toString('utf8').length;
+  } catch { return null; }
+}
+
+/** Over the limit: tell the chat session once in a while; the review pass consolidates on its own. */
+async function checkMemory(bot: Parameters<typeof bots.home>[0] & { id: number }): Promise<number | null> {
+  const size = await memoryChars(bot);
+  if (size !== null && size > config.memoryCharLimit && now() - (memoryNagged.get(bot.id) ?? 0) > 6 * 3600_000) {
+    memoryNagged.set(bot.id, now());
+    events.add(bot.id, `Your memory file CLAUDE.md is ${size} characters long; the limit is ${config.memoryCharLimit}. Consolidate it now, as its rules say: merge lines that say the same, drop what is outdated, shorten what is verbose, keep every fact that still holds.`);
+  }
+  return size;
+}
 
 // ============================================================== usage limit
 let limitUntil = 0;
@@ -76,9 +111,10 @@ async function frontTurn(botId: number, text: string | null): Promise<void> {
   const typingTimer = setInterval(() => tg.typing(botId), 4500);
   tg.typing(botId);
   try {
+    const skills = await skillsOf(bot);
     const attempt = (sessionId: string | null) => runClaude({
       runId: `front-${botId}-${now()}`, role: 'front', bot, model: config.frontModel,
-      systemPrompt: frontPrompt(bot), prompt, sessionId, resume: !!sessionId, screen: false,
+      systemPrompt: frontPrompt(bot, skills), prompt, sessionId, resume: !!sessionId, screen: false,
     });
     let r = await attempt(bot.session_id);
     if (r.sessionMissing) r = await attempt(null);   // session file gone: start over, memory file still applies
@@ -90,13 +126,16 @@ async function frontTurn(botId: number, text: string | null): Promise<void> {
     }
     if (!r.ok) { await tg.send(botId, `⚠️ ${r.text}`, { plain: true }); return; }
     if (r.text.trim()) await tg.send(botId, r.text);
+    checkMemory(bot).catch(() => {});
   } finally {
     clearInterval(typingTimer);
   }
 }
 
 // ==================================================================== tasks
-const ICON: Record<string, string> = { queued: '🕓', running: '⚙️', done: '✅', failed: '❌', cancelled: '🚫', interrupted: '⚠️' };
+const ICON: Record<string, string> = { queued: '🕓', running: '⚙️', waiting: '⏸', done: '✅', failed: '❌', cancelled: '🚫', interrupted: '⚠️' };
+/** running, or paused while it waits for the owner (its process is gone, its session kept) */
+const active = (t: TaskRow) => t.status === 'running' || t.status === 'waiting';
 const statusTimers = new Map<number, NodeJS.Timeout>();
 const lastStatusEdit = new Map<number, number>();
 
@@ -106,10 +145,10 @@ function duration(t: TaskRow): string {
 }
 
 function statusText(t: TaskRow): string {
-  const waiting = t.status === 'running' && requests.pendingForTask(t.id).length > 0;
+  const waiting = active(t) && requests.pendingForTask(t.id).length > 0;
   const head = `${waiting ? '⏸' : ICON[t.status] ?? '•'} **#${t.id} ${t.title}**`;
-  if (t.status === 'running') return waiting ? `${head}\nwaiting for you` : `⏳ **Working: #${t.id} ${t.title}**\n${t.progress ?? 'starting…'}`;
-  if (t.status === 'queued') return `${head}\nqueued`;
+  if (active(t)) return waiting ? `${head}\nwaiting for you` : `⏳ **Working: #${t.id} ${t.title}**\n${t.progress ?? 'starting…'}`;
+  if (t.status === 'queued') return `${head}\n${t.resume ? 'resuming' : 'queued'}`;
   return `${head} (${duration(t)})`;
 }
 
@@ -129,8 +168,8 @@ function refreshStatus(taskId: number, immediate = false): void {
 
 export function taskList(botId: number): string {
   return tasks.recent(botId).reverse().map((t) => {
-    const waiting = t.status === 'running' && requests.pendingForTask(t.id).length > 0;
-    const extra = t.status === 'running' ? ` - ${waiting ? 'waiting for you' : t.progress ?? ''}` : '';
+    const waiting = active(t) && requests.pendingForTask(t.id).length > 0;
+    const extra = active(t) ? ` - ${waiting ? 'waiting for you' : t.progress ?? ''}` : '';
     return `${waiting ? '⏸' : ICON[t.status] ?? '•'} #${t.id} ${t.title} [${t.status}]${extra}`;
   }).join('\n');
 }
@@ -151,37 +190,77 @@ export async function createTask(botId: number, title: string, instructions: str
 
 export const scheduleList = (botId: number) => schedules.forBot(botId).map(describeSchedule).join('\n');
 
-/** Start whatever the limits allow. Called after every state change. */
+/**
+ * Start whatever the limits allow. Called after every state change.
+ * A task paused while it waits for the owner ("waiting") holds no slot, but
+ * its Chrome is still there, so it keeps counting as a screen.
+ */
 export function pump(): void {
   if (limited()) return;
   limitNotified = false;
   const running = tasks.byStatus('running');
-  let screens = running.filter((t) => t.needs_screen).length;
+  const withScreen = [...running, ...tasks.byStatus('waiting')];
+  let screens = withScreen.filter((t) => t.needs_screen).length;
   let slots = config.maxParallelTasks - running.length;
+  let starved = false;
   for (const t of tasks.byStatus('queued')) {
-    if (slots <= 0) break;
+    if (slots <= 0) { starved = true; break; }
     if (t.needs_screen) {
       // one screen per bot, and only so many Chromes fit in the box's memory
       if (screens >= config.maxScreens) continue;
-      if (running.some((r) => r.needs_screen && r.bot_id === t.bot_id)) continue;
+      if (withScreen.some((r) => r.needs_screen && r.bot_id === t.bot_id)) continue;
       screens++;
     }
     slots--;
     running.push({ ...t, status: 'running' });
+    withScreen.push({ ...t, status: 'running' });
     runTask(t).catch((e) => console.error('[task]', e));
   }
+  if (starved) parkOne();
+}
+
+/**
+ * Work is queued and every slot is taken: if one of the running tasks has been
+ * waiting for the owner for a while, stop its process and give the slot away.
+ * Its session is kept; the answer brings it back (see resolveRequest).
+ */
+function parkOne(): void {
+  let oldest: { t: TaskRow; r: RequestRow } | undefined;
+  for (const t of tasks.byStatus('running')) {
+    for (const r of requests.pendingForTask(t.id)) {
+      if (now() - r.created_at < config.parkAfterMs) continue;
+      if (!oldest || r.created_at < oldest.r.created_at) oldest = { t, r };
+    }
+  }
+  if (!oldest) return;
+  log(`task #${oldest.t.id} parked while it waits for the owner (${oldest.r.kind})`);
+  tasks.update(oldest.t.id, { status: 'waiting', resume: 1, progress: null });
+  box.kill(`task-${oldest.t.id}`).catch(() => {});   // runTask sees the status and lets the next task start
+}
+
+/** What a parked task is told when it comes back: the answer it was waiting for. */
+function resumeNote(r: RequestRow, result: string, status: 'done' | 'cancelled'): string {
+  const p = JSON.parse(r.payload);
+  const what = status === 'cancelled' ? 'That request was cancelled.'
+    : r.kind === 'question' ? `The owner answered your question "${p.question}": ${result}`
+    : r.kind === 'approval' ? `Your approval request "${p.action}" came back: ${result}`
+    : r.kind === 'secret' ? result
+    : result;   // help: HELP_DONE / HELP_DECLINED, already worded for the agent
+  return `Your session was paused while you waited for the owner, and is resumed now. ${what}\nContinue the task from where you stopped. Do not ask the same thing again.`;
 }
 
 async function runTask(t: TaskRow): Promise<void> {
   const bot = bots.get(t.bot_id)!;
-  tasks.update(t.id, { status: 'running', started_at: t.started_at ?? now(), progress: null });
+  tasks.update(t.id, { status: 'running', started_at: t.started_at ?? now(), progress: null, resume_note: null });
   refreshStatus(t.id, true);
-  log(`task #${t.id} started (${t.model}${t.needs_screen ? ', screen' : ''})`);
+  log(`task #${t.id} ${t.resume ? 'resumed' : 'started'} (${t.model}${t.needs_screen ? ', screen' : ''})`);
+  const skills = await skillsOf(bot);
 
   const r = await runClaude({
     runId: `task-${t.id}`, role: 'task', bot, taskId: t.id, model: t.model,
-    systemPrompt: taskPrompt(bot, !!t.needs_screen, !!t.unattended),
-    prompt: t.resume ? 'You were interrupted. Continue the task from where you stopped.' : `# Task: ${t.title}\n\n${t.instructions}`,
+    systemPrompt: taskPrompt(bot, !!t.needs_screen, !!t.unattended, skills),
+    prompt: t.resume ? `[system] ${t.resume_note ?? 'You were interrupted. Continue the task from where you stopped.'}`
+      : `# Task: ${t.title}\n\n${t.instructions}${t.resume_note ? `\n\n[system] An earlier attempt at this task was interrupted and its progress is lost; start over. What it was told last: ${t.resume_note}` : ''}`,
     sessionId: t.session_id, resume: !!(t.resume && t.session_id), screen: !!t.needs_screen,
     onEvent: (ev) => {
       if (ev.type === 'system' && ev.session_id) tasks.update(t.id, { session_id: ev.session_id });
@@ -190,16 +269,28 @@ async function runTask(t: TaskRow): Promise<void> {
     },
   });
 
-  cancelRequestsOf(t.id);
   const current = tasks.get(t.id)!;
+  // Parked: the process was stopped on purpose, the pending request stays, the
+  // answer re-queues the task (resolveRequest). Just hand the slot on.
+  if (current.status === 'waiting') { tasks.update(t.id, { session_id: r.sessionId ?? current.session_id }); refreshStatus(t.id, true); return pump(); }
+  cancelRequestsOf(t.id);
   if (current.status === 'cancelled') { refreshStatus(t.id, true); return pump(); }   // cancelTask already reported
 
   if (r.limitHit) {
     // back in the queue; it resumes its own session once the limit resets
-    tasks.update(t.id, { status: 'queued', resume: 1, session_id: r.sessionId ?? current.session_id, progress: null });
+    tasks.update(t.id, { status: 'queued', resume: 1, session_id: r.sessionId ?? current.session_id, progress: null, resume_note: t.resume_note });
     refreshStatus(t.id, true);
     hitLimit(t.bot_id, r.limitResetAt);
     return;
+  }
+  // A session stopped in the middle of a tool call may not be resumable (the
+  // transcript ends in an open tool use), or its file may be gone: start the
+  // task over once, telling it what the resumed run would have been told.
+  if (t.resume && !r.ok && (r.sessionMissing || /tool_use|tool_result/i.test(`${r.text}\n${r.exit.stderr}`))) {
+    log(`task #${t.id} could not resume its session (${r.text.trim().split('\n').pop()}); starting it over`);
+    tasks.update(t.id, { status: 'queued', resume: 0, session_id: null, progress: null, resume_note: t.resume_note });
+    refreshStatus(t.id, true);
+    return pump();
   }
 
   tasks.update(t.id, { status: r.ok ? 'done' : 'failed', result: r.text, finished_at: now(), session_id: r.sessionId ?? current.session_id });
@@ -209,25 +300,67 @@ async function runTask(t: TaskRow): Promise<void> {
   clearTimeout(statusTimers.get(t.id)); statusTimers.delete(t.id);
   if (current.status_msg_id && !(await tg.remove(t.bot_id, current.status_msg_id))) refreshStatus(t.id, true);
   const done = tasks.get(t.id)!;
+  tasks.index(done);
   // An unattended run that went well and has nothing for the owner ends without a message.
   if (r.ok && done.unattended && (done.quiet || !r.text.trim())) {
     log(`task #${t.id} had nothing to report`);
-    events.add(t.bot_id, `The unattended task #${t.id} "${t.title}" ran and had nothing to report, so the owner was not messaged.${r.text.trim() ? ` Its note: ${quoted(r.text.trim().slice(0, 500))}` : ''}`);
+    events.add(t.bot_id, `The unattended task #${t.id} "${t.title}" ran and had nothing to report, so the owner was not messaged.${r.text.trim() ? ` Its note:\n${fence('task note', r.text.trim().slice(0, 500), { task: t.id })}` : ''}`);
+    checkMemory(bot).catch(() => {});
     return pump();
   }
   const body = r.text.trim() || (r.ok ? 'Done.' : 'The task failed without an explanation.');
   const head = `${r.ok ? '✅' : '❌'} **#${t.id} ${t.title}** (${duration(done)})`;
   await tg.send(t.bot_id, `${head}\n\n${body}`)
     .catch((e) => console.error('[task] result delivery failed', e));
-  events.add(t.bot_id, `Task #${t.id} "${t.title}" ${r.ok ? 'finished' : 'FAILED'}; the owner already received this result:\n${quoted(body.slice(0, 2500))}`);
-  noteDelegated(done, r.ok, body);
+  // A long result is cut for the chat session's note and kept in full as a file.
+  const file = body.length > config.spillChars ? await spillTask(bot, done).catch(() => '') : '';
+  const note = `${fence('task result', body.slice(0, config.spillChars), { task: t.id })}${file ? `\n(Cut at ${config.spillChars} of ${body.length} characters. The full text is at ${file}; read_task ${t.id} shows it too.)` : ''}`;
+  events.add(t.bot_id, `Task #${t.id} "${t.title}" ${r.ok ? 'finished' : 'FAILED'}; the owner already received this result:\n${note}`);
+  noteDelegated(done, r.ok, note);
+  queueReview(bot, done);
   pump();
+}
+
+/** Write a finished task's brief and result to the bot's folder; returns the path. */
+async function spillTask(bot: { slug: string } & Parameters<typeof bots.home>[0], t: TaskRow): Promise<string> {
+  const p = `${bots.home(bot)}/tasks/${t.id}.md`;
+  const when = (ms: number | null) => (ms ? localTime(ms) : '');
+  await box.putFile(p, Buffer.from(`# Task #${t.id}: ${t.title}\n\nStatus: ${t.status}. Started ${when(t.started_at)}, finished ${when(t.finished_at)} (${config.timezone}).\n\n## Brief\n\n${t.instructions}\n\n## Result\n\n${t.result ?? ''}\n`));
+  return p;
+}
+
+// ================================================================== review
+// After a task, a cheap model picks up the task's own session and writes what
+// should be remembered into the memory file and the skills. One at a time per
+// bot; the chat session and the owner are not involved.
+const reviewQueues = new Map<number, Promise<void>>();
+
+function queueReview(bot: ReturnType<typeof bots.get> & {}, t: TaskRow): void {
+  if (!config.memoryReview || !t.session_id) return;
+  const prev = reviewQueues.get(bot.id) ?? Promise.resolve();
+  reviewQueues.set(bot.id, prev.then(() => reviewTask(bot, t)).catch((e) => console.error('[review]', e)));
+}
+
+async function reviewTask(bot: ReturnType<typeof bots.get> & {}, t: TaskRow): Promise<void> {
+  if (limited()) return;
+  const memorySize = await memoryChars(bot);
+  const skills = await skillsOf(bot, true);
+  const r = await runClaude({
+    runId: `review-${t.id}-${now()}`, role: 'review', bot, taskId: t.id, model: config.memoryReviewModel,
+    systemPrompt: reviewPrompt(bot, t, memorySize, skills),
+    prompt: '[system] The task is over. Do the memory review now, as your system prompt says: edit CLAUDE.md and the skills if there is something to keep, then answer in one line.',
+    sessionId: t.session_id, resume: true, screen: false,
+  });
+  if (r.limitHit) { log(`review of task #${t.id} skipped: usage limit`); return; }
+  log(`review of task #${t.id}: ${r.ok ? r.text.trim().split('\n')[0].slice(0, 200) : `failed: ${r.text.slice(0, 200)}`}`);
+  skillCache.delete(bot.id);   // it may have written one
+  await checkMemory(bot);
 }
 
 export async function cancelTask(taskId: number): Promise<string> {
   const t = tasks.get(taskId);
   if (!t) return 'No such task.';
-  if (t.status !== 'running' && t.status !== 'queued') return `Task #${taskId} is already ${t.status}.`;
+  if (!active(t) && t.status !== 'queued') return `Task #${taskId} is already ${t.status}.`;
   tasks.update(taskId, { status: 'cancelled', finished_at: now() });
   if (t.status === 'running') await box.kill(`task-${taskId}`).catch(() => {});
   cancelRequestsOf(taskId);
@@ -236,9 +369,13 @@ export async function cancelTask(taskId: number): Promise<string> {
   return `Task #${taskId} cancelled.`;
 }
 
-/** After a restart nothing in the box is observed any more: stop it and say so. */
+/**
+ * After a restart nothing in the box is observed any more: stop it and say so.
+ * Tasks parked while waiting for the owner have no process; they survive as they are.
+ */
 export async function recoverAfterRestart(): Promise<void> {
   await box.killAll().catch(() => {});
+  tasks.indexMissing();
   for (const t of tasks.byStatus('running')) {
     tasks.update(t.id, { status: 'interrupted', finished_at: now() });
     cancelRequestsOf(t.id);
@@ -278,7 +415,15 @@ export function resolveRequest(id: string, result: string, status: 'done' | 'can
     // a chat question the owner answered by typing instead: just drop its buttons
     tg.edit(r.bot_id, r.tg_msg_id, r.kind === 'choice' && status === 'cancelled' ? String(summary) : `${summary} ${tail}`).catch(() => {});
   }
-  if (r.task_id) refreshStatus(r.task_id, true);
+  if (r.task_id) {
+    // A parked task gets its answer as the first line of its next run.
+    const t = tasks.get(r.task_id);
+    if (t?.status === 'waiting') {
+      tasks.update(t.id, { status: 'queued', resume: 1, resume_note: resumeNote(r, result, status) });
+      pump();
+    }
+    refreshStatus(r.task_id, true);
+  }
   return true;
 }
 
@@ -307,7 +452,7 @@ export function waitRequest(id: string): Promise<{ result?: string; error?: stri
 }
 
 /** Text a task wrote, passed on to a chat session: it must not be able to pose as a control-service line. */
-export const quoted = (s: string): string => s.replace(/^[ \t]*\[(system|owner)\]/gim, '($1)');
+export const quoted = neutralize;
 
 export const HELP_DONE = 'The owner says they are done. Look at the screen and continue.';
 export const HELP_DECLINED = 'DECLINED: the owner will not do this. Do not ask for the same help again; continue without it if you can, otherwise finish and explain what is blocked.';
@@ -316,13 +461,21 @@ export const HELP_DECLINED = 'DECLINED: the owner will not do this. Do not ask f
  * Ask the owner to approve an action. With `exec`, core itself performs the
  * action after the tap (mail sending/trashing), so the agent cannot skip the
  * question; without it, the agent is told the answer and acts itself.
+ * A task's request offers a third button: approve this and everything else
+ * this task asks for. From then on its requests are shown and done at once.
  */
 export async function createApproval(bot: { id: number }, task: TaskRow | undefined, action: string, details: string, exec?: unknown): Promise<string> {
   const r = requests.create(bot.id, task?.id ?? null, 'approval', { action, exec });
   const label = task ? `**#${task.id} ${task.title}**\n` : '';
-  const msgId = await tg.send(bot.id, `${label}✋ **Approval needed:** ${action}\n\n${details}`, {
-    keyboard: new InlineKeyboard().text('✅ Approve', `ap:${r.id}:y`).text('🚫 Deny', `ap:${r.id}:n`),
-  });
+  if (task && tasks.get(task.id)?.auto_approve) {
+    const msgId = await tg.send(bot.id, `${label}⏩ **Approved in advance:** ${action}\n\n${details}`);
+    requests.setMessage(r.id, msgId);
+    await handleButton('ap', r.id, 'y');
+    return r.id;
+  }
+  const keyboard = new InlineKeyboard().text('✅ Approve', `ap:${r.id}:y`).text('🚫 Deny', `ap:${r.id}:n`);
+  if (task) keyboard.row().text('⏩ Approve this and the rest of this task', `ap:${r.id}:a`);
+  const msgId = await tg.send(bot.id, `${label}✋ **Approval needed:** ${action}\n\n${details}`, { keyboard });
   requests.setMessage(r.id, msgId);
   if (task) refreshStatus(task.id, true);
   return r.id;
@@ -357,6 +510,12 @@ export function screenDone(botId: number): void {
 export async function handleButton(kind: string, id: string, arg?: string): Promise<string> {
   if (kind === 'ap') {
     const r = requests.get(id);
+    let all = false;
+    if (arg === 'a' && r?.status === 'pending') {
+      // this one and every later request of the task: the owner trusts the run
+      if (r.task_id) tasks.update(r.task_id, { auto_approve: 1 });
+      arg = 'y'; all = true;
+    }
     const exec = r?.status === 'pending' ? JSON.parse(r.payload).exec : undefined;
     if (arg === 'y' && r && exec) {
       if (executing.has(id)) return 'Already in progress';
@@ -372,7 +531,7 @@ export async function handleButton(kind: string, id: string, arg?: string): Prom
           : await execApproved(r.bot_id, exec);
         resolveRequest(id, `approved and done: ${out}`);
         tellFront(`The owner approved "${action}" and it is done: ${out} Confirm it to them in one short line.`);
-        return 'Approved and done';
+        return all ? 'Approved and done; the rest of this task too' : 'Approved and done';
       } catch (e: any) {
         resolveRequest(id, `approved, but it FAILED: ${e.message}`);
         tg.send(r.bot_id, `⚠️ Approved, but it failed: ${e.message}`, { replyTo: r.tg_msg_id ?? undefined, plain: true }).catch(() => {});
@@ -382,7 +541,7 @@ export async function handleButton(kind: string, id: string, arg?: string): Prom
     }
     const done = resolveRequest(id, arg === 'y' ? 'approved' : 'denied');
     if (done && arg !== 'y' && r && exec && !r.task_id) events.add(r.bot_id, `The owner denied "${JSON.parse(r.payload).action}". Do not ask for it again unless they bring it up.`);
-    return done ? (arg === 'y' ? 'Approved' : 'Denied') : 'Already handled';
+    return done ? (arg === 'y' ? (all ? 'Approved; the rest of this task too' : 'Approved') : 'Denied') : 'Already handled';
   }
   if (kind === 'op') {
     // an option button: under a chat question it becomes the owner's next
@@ -398,16 +557,29 @@ export async function handleButton(kind: string, id: string, arg?: string): Prom
   return '';
 }
 
-// Nudge the owner about things still waiting on them, and keep screens that
-// are waiting for their help from being put to sleep.
+// Nudge the owner about things still waiting on them, keep screens that are
+// waiting for their help from being put to sleep, and let runs nobody asked
+// for give up waiting: silence is a "no".
 export function startRequestLoops(): void {
   setInterval(() => {
     for (const r of requests.pending()) {
       if (r.kind === 'help') box.touchDisplay(bots.display(bots.get(r.bot_id)!));
     }
+    if (tasks.byStatus('queued').length) pump();   // a waiting task may have become parkable
   }, 60_000).unref();
   setInterval(() => {
+    const hours = Math.round(config.unattendedAnswerMs / 3600_000);
     for (const r of requests.pending()) {
+      const t = r.task_id ? tasks.get(r.task_id) : undefined;
+      if (t?.unattended && now() - r.created_at > config.unattendedAnswerMs) {
+        const outcome = r.kind === 'approval' ? `denied: the owner did not answer within ${hours} hours, so this unattended run may not do it`
+          : r.kind === 'help' ? HELP_DECLINED
+          : `UNANSWERED: the owner did not answer within ${hours} hours. Continue without it, or finish and say what is left.`;
+        resolveRequest(r.id, outcome);
+        log(`request ${r.id} (${r.kind}) of unattended task #${t.id} timed out`);
+        tg.send(r.bot_id, `⌛ No answer for ${hours} hours, so the task ${requestLabel(r)} goes on without it${r.kind === 'approval' ? ' (treated as denied)' : ''}.`, { replyTo: r.tg_msg_id ?? undefined }).catch(() => {});
+        continue;
+      }
       if (now() - r.reminded_at < config.remindAfterMs) continue;
       requests.setReminded(r.id);
       tg.send(r.bot_id, `🔔 Still waiting for you here (${requestLabel(r)}).`, { replyTo: r.tg_msg_id ?? undefined }).catch(() => {});
@@ -527,6 +699,18 @@ export async function toolCall(ctx: RunContext, tool: string, a: any): Promise<R
     }
 
     // ------------------------------------------------------------------ shared
+    case 'search_tasks': {
+      const hits = tasks.search(bot.id, String(a.query ?? ''), Math.min(Number(a.max) || 8, 20));
+      if (!hits.length) return { result: 'No earlier task matches.' };
+      const lines = hits.map((h) => `#${h.task.id} ${localTime(h.task.finished_at ?? h.task.created_at)} [${h.task.status}] ${h.task.title}\n    ${h.snippet.replace(/\s+/g, ' ')}`);
+      return { result: `${hits.length} earlier task(s), newest first by relevance. Snippets may quote third-party text:\n${fence('earlier task results', lines.join('\n'))}` };
+    }
+    case 'read_task': {
+      const t = ownTask(Number(a.task_id));
+      if (!t) return { error: 'No such task of yours.' };
+      const when = `${localTime(t.created_at)}${t.finished_at ? ` to ${localTime(t.finished_at)}` : ''}`;
+      return { result: `# Task #${t.id}: ${t.title}\nStatus: ${t.status}, ${when} (${config.timezone}).\n\n## Brief\n${t.instructions}\n\n## Result\n${t.result ? fence('earlier task result', t.result, { task: t.id }) : '(none yet)'}` };
+    }
     case 'send_file': {
       const p = String(a.path);
       const st = await box.stat(p);

@@ -34,6 +34,22 @@ export const config = {
   remindAfterMs: Number(process.env.REMIND_HOURS || 3) * 3600_000,
   linkTtlMs: 24 * 3600_000,
   telegramFileLimit: 49 * 1024 * 1024,
+
+  // A bot's memory file is loaded into every session: keep it short. Past the
+  // limit the bot is told to consolidate, and the review pass does it too.
+  memoryCharLimit: Number(process.env.MEMORY_CHAR_LIMIT || 8000),
+  // After a task, a cheap model replays its session and saves what should be
+  // remembered (memory file, skills) without touching the chat session.
+  memoryReview: process.env.MEMORY_REVIEW !== '0',
+  memoryReviewModel: process.env.MEMORY_REVIEW_MODEL || 'haiku',
+  // A run nobody asked for (schedule, mail watch) does not wait on the owner
+  // forever: an unanswered approval is denied, an unanswered question dropped.
+  unattendedAnswerMs: Number(process.env.UNATTENDED_ANSWER_HOURS || 12) * 3600_000,
+  // A task waiting on the owner for longer than this gives up its slot when
+  // other tasks are queued; it is resumed with the answer when it arrives.
+  parkAfterMs: Number(process.env.PARK_AFTER_SECONDS || 60) * 1000,
+  // Longer texts handed to a chat session are cut here and written to a file in full.
+  spillChars: Number(process.env.SPILL_CHARS || 2500),
 };
 
 if (config.masterKey.length !== 32) throw new Error('MASTER_KEY must be 32 bytes of hex');
