@@ -82,17 +82,32 @@ export function exitChanged(office: boolean): void {
 
 // ============================================================ chat session
 const frontQueues = new Map<number, Promise<void>>();
+/** What the next turn will carry; grows while a turn is running, so a burst never becomes a row of turns. */
+const frontPending = new Map<number, { parts: string[]; msgId: number | null }>();
+/** A reply of just 👍 means "nothing to say": the owner gets a reaction on their message, or nothing. */
+const SILENT = /^(?:👍|👌)[\uFE0F\u{1F3FB}-\u{1F3FF}]*$/u;
 
-/** Queue a turn of the bot's chat session. text=null: a turn triggered by system events only. */
-export function enqueueFront(botId: number, text: string | null): void {
+/** Queue a turn of the bot's chat session. text=null: a turn triggered by system events only. msgId: the owner's last message, for a reaction. */
+export function enqueueFront(botId: number, text: string | null, msgId: number | null = null): void {
+  const waiting = frontPending.get(botId);
+  if (waiting) {
+    if (text) waiting.parts.push(text);
+    if (msgId) waiting.msgId = msgId;
+    return;
+  }
+  frontPending.set(botId, { parts: text ? [text] : [], msgId });
   const prev = frontQueues.get(botId) ?? Promise.resolve();
-  frontQueues.set(botId, prev.then(() => frontTurn(botId, text)).catch((e) => {
+  frontQueues.set(botId, prev.then(() => {
+    const p = frontPending.get(botId)!;
+    frontPending.delete(botId);
+    return frontTurn(botId, p.parts.join('\n\n') || null, p.msgId);
+  }).catch((e) => {
     console.error('[front]', e);
     tg.send(botId, `Something broke on my side: ${e.message}`).catch(() => {});
   }));
 }
 
-async function frontTurn(botId: number, text: string | null): Promise<void> {
+async function frontTurn(botId: number, text: string | null, msgId: number | null): Promise<void> {
   const bot = bots.get(botId)!;
   if (limited()) {
     await tg.send(botId, '⏳ Still paused by the Claude usage limit; I will pick this up when it resets.');
@@ -105,7 +120,7 @@ async function frontTurn(botId: number, text: string | null): Promise<void> {
     notes.push(`[system] Task #${q.task_id} is waiting for the owner's answer to: ${JSON.parse(q.payload).question}`);
   }
   if (!text && !hadEvents && !requests.pendingQuestions(botId).length) return;
-  const prompt = [...notes, text ?? '[system] No new message from the owner; react to the events above if they need action, otherwise reply with nothing.']
+  const prompt = [...notes, text ?? '[system] No new message from the owner; react to the events above if they need action, otherwise reply with 👍 alone.']
     .join('\n\n');
 
   const typingTimer = setInterval(() => tg.typing(botId), 4500);
@@ -125,7 +140,9 @@ async function frontTurn(botId: number, text: string | null): Promise<void> {
       return;
     }
     if (!r.ok) { await tg.send(botId, `⚠️ ${r.text}`, { plain: true }); return; }
-    if (r.text.trim()) await tg.send(botId, r.text);
+    const reply = r.text.trim();
+    if (SILENT.test(reply)) { if (msgId) await tg.react(botId, msgId, '👍'); }
+    else if (reply) await tg.send(botId, r.text);
     checkMemory(bot).catch(() => {});
   } finally {
     clearInterval(typingTimer);

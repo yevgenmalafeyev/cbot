@@ -101,6 +101,27 @@ export async function edit(botId: number, msgId: number, text: string, keyboard?
 export const remove = (botId: number, msgId: number) => api(botId).deleteMessage(config.ownerId, msgId).then(() => true, () => false);
 
 export const typing = (botId: number) => api(botId).sendChatAction(config.ownerId, 'typing').catch(() => {});
+/** A reaction on one of the owner's messages: an acknowledgement that is not a message. */
+export const react = (botId: number, msgId: number, emoji: '👍' | '👌') =>
+  api(botId).setMessageReaction(config.ownerId, msgId, [{ type: 'emoji', emoji }]).catch(() => {});
+
+// Messages that arrive together (the photos of an album, a few lines typed in
+// a row) become one turn of the chat session, not one turn each. Telegram
+// delivers an album as separate updates, so the only signal is time.
+const BATCH_MS = 1500;
+const batches = new Map<number, { parts: string[]; msgId: number; timer: NodeJS.Timeout }>();
+function batch(row: BotRow, part: string, msgId: number): void {
+  const b = batches.get(row.id) ?? { parts: [], msgId, timer: undefined as unknown as NodeJS.Timeout };
+  clearTimeout(b.timer);
+  b.parts.push(part);
+  b.msgId = msgId;
+  b.timer = setTimeout(() => {
+    batches.delete(row.id);
+    agent.dropChoices(row.id);
+    agent.enqueueFront(row.id, b.parts.join('\n'), b.msgId);
+  }, BATCH_MS);
+  batches.set(row.id, b);
+}
 
 export async function sendDocument(botId: number, data: Buffer, filename: string, caption?: string): Promise<void> {
   await api(botId).sendDocument(config.ownerId, new InputFile(data, filename), caption ? { caption: caption.slice(0, 1000) } : {});
@@ -233,8 +254,7 @@ export function wire(row: BotRow, bot: Bot) {
         await ctx.react('👌').catch(() => {});
         return;
       }
-      agent.dropChoices(row.id);
-      agent.enqueueFront(row.id, [text, ...notes].filter(Boolean).join('\n'));
+      batch(row, [text, ...notes].filter(Boolean).join('\n'), m.message_id);
     } catch (e: any) {
       console.error(`[tg:${row.slug}]`, e);
       await ctx.reply(`Could not process that message: ${e.message}`).catch(() => {});
