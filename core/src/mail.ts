@@ -398,9 +398,23 @@ export async function mailTool(ctx: RunContext, bot: BotRow, task: TaskRow | und
     }
     case 'mail_disconnect': {
       const acc = account(bot.id, a.account);
+      let google = '';
+      if (acc.kind === 'gmail') {
+        // Revoking the refresh token ends the grant on Google's side too, so the
+        // app leaves the owner's permissions page without them lifting a finger.
+        // Not while another bot still works with the same account: one grant per account.
+        const elsewhere = (db.prepare('SELECT COUNT(*) AS n FROM mail_accounts WHERE kind = ? AND address = ? AND id != ?').get('gmail', acc.address, acc.id) as { n: number }).n;
+        if (elsewhere) google = ' Google access stays, because another bot is still connected to this account.';
+        else {
+          const ok = await fetch('https://oauth2.googleapis.com/revoke', { method: 'POST', body: new URLSearchParams({ token: creds<GmailCreds>(acc).refresh_token }) })
+            .then((res) => res.ok, () => false);
+          google = ok ? ' Its access to Google was revoked.' : ' Google did not confirm the revocation: the owner can remove the app at myaccount.google.com/permissions.';
+        }
+        accessTokens.delete(acc.id);
+      }
       db.prepare('DELETE FROM mail_watches WHERE account_id = ?').run(acc.id);
       db.prepare('DELETE FROM mail_accounts WHERE id = ?').run(acc.id);
-      return { result: `Disconnected ${acc.address}. Its watches were removed.${acc.kind === 'gmail' ? ' The owner can also revoke access at myaccount.google.com/permissions.' : ''}` };
+      return { result: `Disconnected ${acc.address}.${google} Its watches were removed.` };
     }
 
     case 'mail_search': {

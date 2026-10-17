@@ -15,6 +15,17 @@ export const config = {
   // how the box reaches this process (the internal listener)
   coreUrlFromBox: process.env.CORE_URL_FROM_BOX || 'http://core:8791',
   groqKey: process.env.GROQ_API_KEY || '',
+  // Spoken replies (Telegram voice messages): Azure Speech when configured
+  // (many languages), else Groq (English only); see speech.ts.
+  azureSpeechKey: process.env.AZURE_SPEECH_KEY || '',
+  azureSpeechRegion: process.env.AZURE_SPEECH_REGION || '',
+  /** only for a resource with a custom domain, e.g. https://name.cognitiveservices.azure.com */
+  azureSpeechEndpoint: process.env.AZURE_SPEECH_ENDPOINT || '',
+  /** for languages without a voice of their own in speech.ts */
+  azureVoice: process.env.AZURE_TTS_VOICE || 'en-US-AvaMultilingualNeural',
+  ttsModel: process.env.TTS_MODEL || 'canopylabs/orpheus-v1-english',
+  ttsVoice: process.env.TTS_VOICE || 'hannah',
+  ttsMaxChars: Number(process.env.TTS_MAX_CHARS || 2000),
   // Google OAuth client (type: web application) used to connect Gmail accounts
   googleClientId: process.env.GOOGLE_CLIENT_ID || '',
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',

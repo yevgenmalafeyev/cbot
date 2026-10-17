@@ -9,7 +9,8 @@ COPY src ./src
 RUN npx tsc -p . && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata \
+# ffmpeg: packs synthesised speech as Ogg/Opus for Telegram voice messages
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata ffmpeg \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /opt/novnc \
  && curl -fsSL https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz \

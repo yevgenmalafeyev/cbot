@@ -85,7 +85,16 @@ CREATE TABLE IF NOT EXISTS events (   -- notes for a bot's chat session, deliver
 );
 `);
 
-export interface BotRow { id: number; slug: string; name: string; token_enc: Buffer | null; instructions: string; session_id: string | null; created_at: number }
+export interface BotRow {
+  id: number; slug: string; name: string; token_enc: Buffer | null; instructions: string; session_id: string | null; created_at: number;
+  /** 1: the owner wants to hear this bot: its messages go out as voice messages (speech.ts) */
+  voice: number;
+  /** language of spoken replies ("pt-PT", "uk", or an Azure voice name); NULL: guessed from each text */
+  voice_lang: string | null;
+}
+for (const col of ['voice INTEGER NOT NULL DEFAULT 0', 'voice_lang TEXT']) {
+  try { db.exec(`ALTER TABLE bots ADD COLUMN ${col}`); } catch { /* already there */ }
+}
 for (const col of ['unattended INTEGER NOT NULL DEFAULT 0', 'quiet INTEGER NOT NULL DEFAULT 0', 'resume_note TEXT', 'auto_approve INTEGER NOT NULL DEFAULT 0']) {
   try { db.exec(`ALTER TABLE tasks ADD COLUMN ${col}`); } catch { /* already there */ }
 }
@@ -148,6 +157,8 @@ export const bots = {
     return db.prepare(`SELECT * FROM bots WHERE slug = 'main'`).get() as BotRow;
   },
   setSession: (id: number, sid: string | null) => db.prepare('UPDATE bots SET session_id = ? WHERE id = ?').run(sid, id),
+  setVoice: (id: number, on: boolean) => db.prepare('UPDATE bots SET voice = ? WHERE id = ?').run(on ? 1 : 0, id),
+  setVoiceLang: (id: number, lang: string | null) => db.prepare('UPDATE bots SET voice_lang = ? WHERE id = ?').run(lang, id),
   token: (b: BotRow) => (b.token_enc ? decrypt(b.token_enc) : config.mainBotToken),
   home: (b: BotRow) => `/home/bot/bots/${b.slug}`,
   // X display number; VNC is on 5900 + this

@@ -26,14 +26,19 @@ exactly one Telegram account: yours.
   stored encrypted, and typed into login forms by the control plane itself;
   the agent's machine is never handed the value.
 - **Mail.** Gmail (API) and any IMAP/SMTP mailbox, any number per bot. A mail
-  watch starts a task only when a matching message arrives.
+  watch starts a task only when a matching message arrives. Disconnecting a
+  Gmail account also revokes the bot's access at Google.
+- **Tap to answer.** Whenever a bot asks you something with a few likely
+  answers, they come as buttons under its message; a tap is your reply.
 - **Schedules.** Recurring (cron) and one-off tasks. Scheduled and
   mail-triggered runs work out of sight and message you only when they have
   something for you.
 - **A fleet.** Ask the main bot for another bot with its own role. Each gets
   its own Telegram identity, memory, Chrome profile and screen.
-- **Voice and files.** Voice messages are transcribed (optional, Groq); files
-  go both ways.
+- **Voice and files.** Voice messages are transcribed (optional, Groq). Ask a
+  bot to talk, or send `/voice`, and its replies come as voice messages with
+  the text attached: in your language and accent with Azure Speech (its free
+  tier is enough), or in English with Groq. Files go both ways.
 - **Memory that stays useful.** Each bot keeps a short memory file with a size
   limit, consolidates it when it grows, and can search every task it ever ran
   (full-text, in SQLite). After a task, a cheap model reviews what happened
@@ -116,7 +121,8 @@ Then set up the firewall and the reverse proxy as described in
 
 Main settings (`.env.example` has them all): `TELEGRAM_BOT_TOKEN`,
 `OWNER_TG_ID`, `PUBLIC_URL`, `MASTER_KEY`, `BOXD_TOKEN`. Optional:
-`GROQ_API_KEY` (voice), `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (Gmail),
+`GROQ_API_KEY` (voice), `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` (spoken
+replies in many languages), `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (Gmail),
 `TZ`, `FRONT_MODEL`, `TASK_MODEL`, and the tuning knobs `MEMORY_CHAR_LIMIT`,
 `MEMORY_REVIEW`, `MEMORY_REVIEW_MODEL`, `UNATTENDED_ANSWER_HOURS`,
 `PARK_AFTER_SECONDS`, `SPILL_CHARS`.

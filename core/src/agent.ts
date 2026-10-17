@@ -12,6 +12,7 @@ import { frontPrompt, reviewPrompt, taskPrompt, Skill } from './prompts.js';
 import { execApproved, mailTool } from './mail.js';
 import { execFleet, fleetTool, noteDelegated } from './fleet.js';
 import { fence, neutralize } from './untrusted.js';
+import { multilingual, speechReady, validVoiceSetting } from './speech.js';
 import * as tg from './telegram.js';
 
 const log = (...a: unknown[]) => console.log('[agent]', ...a);
@@ -86,6 +87,30 @@ const frontQueues = new Map<number, Promise<void>>();
 const frontPending = new Map<number, { parts: string[]; msgId: number | null }>();
 /** A reply of just 👍 means "nothing to say": the owner gets a reaction on their message, or nothing. */
 const SILENT = /^(?:👍|👌)[\uFE0F\u{1F3FB}-\u{1F3FF}]*$/u;
+/** A text to the owner may end with a line `[buttons: Yes | No]`: the answers become buttons under the message. */
+const BUTTONS = /\n?[ \t]*\[buttons?:\s*([^\]\n]+)\]\s*$/i;
+export function splitButtons(text: string): { text: string; options: string[] } {
+  const m = text.match(BUTTONS);
+  const options = m ? m[1].split('|').map((s) => s.trim().slice(0, 60)).filter(Boolean).slice(0, 5) : [];
+  return options.length ? { text: text.replace(BUTTONS, '').trimEnd(), options } : { text, options };
+}
+/**
+ * Send a model's text to the owner with the buttons it asked for. A tap reaches
+ * the chat session as the owner's next message, whoever wrote the text (the
+ * chat session, a task's result, an interim note): the task is over by then,
+ * and following up is the chat session's job anyway.
+ */
+async function sendWithButtons(botId: number, text: string, options: string[]): Promise<number> {
+  const b = bots.get(botId);
+  const voice = !!b?.voice, voiceLang = b?.voice_lang ?? null;
+  if (!options.length) return tg.send(botId, text, { voice, voiceLang });
+  dropChoices(botId);
+  const question = text.trim().split('\n').map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 200) ?? '';
+  const r = requests.create(botId, null, 'choice', { question, options, inline: true });
+  const msgId = await tg.send(botId, text, { keyboard: optionButtons(r.id, options), voice, voiceLang });
+  requests.setMessage(r.id, msgId);
+  return msgId;
+}
 
 /** Queue a turn of the bot's chat session. text=null: a turn triggered by system events only. msgId: the owner's last message, for a reaction. */
 export function enqueueFront(botId: number, text: string | null, msgId: number | null = null): void {
@@ -142,7 +167,7 @@ async function frontTurn(botId: number, text: string | null, msgId: number | nul
     if (!r.ok) { await tg.send(botId, `⚠️ ${r.text}`, { plain: true }); return; }
     const reply = r.text.trim();
     if (SILENT.test(reply)) { if (msgId) await tg.react(botId, msgId, '👍'); }
-    else if (reply) await tg.send(botId, r.text);
+    else if (reply) { const b = splitButtons(reply); await sendWithButtons(botId, b.text, b.options); }
     checkMemory(bot).catch(() => {});
   } finally {
     clearInterval(typingTimer);
@@ -310,7 +335,8 @@ async function runTask(t: TaskRow): Promise<void> {
     return pump();
   }
 
-  tasks.update(t.id, { status: r.ok ? 'done' : 'failed', result: r.text, finished_at: now(), session_id: r.sessionId ?? current.session_id });
+  const { text: resultText, options } = splitButtons(r.text.trim());
+  tasks.update(t.id, { status: r.ok ? 'done' : 'failed', result: resultText, finished_at: now(), session_id: r.sessionId ?? current.session_id });
   log(`task #${t.id} ${r.ok ? 'done' : 'failed'}`);
   // The "working" message has done its job: remove it and let the result stand
   // alone. If Telegram refuses the delete, fall back to marking it finished.
@@ -319,15 +345,15 @@ async function runTask(t: TaskRow): Promise<void> {
   const done = tasks.get(t.id)!;
   tasks.index(done);
   // An unattended run that went well and has nothing for the owner ends without a message.
-  if (r.ok && done.unattended && (done.quiet || !r.text.trim())) {
+  if (r.ok && done.unattended && (done.quiet || !resultText)) {
     log(`task #${t.id} had nothing to report`);
-    events.add(t.bot_id, `The unattended task #${t.id} "${t.title}" ran and had nothing to report, so the owner was not messaged.${r.text.trim() ? ` Its note:\n${fence('task note', r.text.trim().slice(0, 500), { task: t.id })}` : ''}`);
+    events.add(t.bot_id, `The unattended task #${t.id} "${t.title}" ran and had nothing to report, so the owner was not messaged.${resultText ? ` Its note:\n${fence('task note', resultText.slice(0, 500), { task: t.id })}` : ''}`);
     checkMemory(bot).catch(() => {});
     return pump();
   }
-  const body = r.text.trim() || (r.ok ? 'Done.' : 'The task failed without an explanation.');
+  const body = resultText || (r.ok ? 'Done.' : 'The task failed without an explanation.');
   const head = `${r.ok ? '✅' : '❌'} **#${t.id} ${t.title}** (${duration(done)})`;
-  await tg.send(t.bot_id, `${head}\n\n${body}`)
+  await sendWithButtons(t.bot_id, `${head}\n\n${body}`, options)
     .catch((e) => console.error('[task] result delivery failed', e));
   // A long result is cut for the chat session's note and kept in full as a file.
   const file = body.length > config.spillChars ? await spillTask(bot, done).catch(() => '') : '';
@@ -418,7 +444,10 @@ export function resolveRequest(id: string, result: string, status: 'done' | 'can
   links.useForRequest(id);
   waiters.get(id)?.forEach((w) => w());
   waiters.delete(id);
-  if (r.tg_msg_id) {
+  if (r.tg_msg_id && JSON.parse(r.payload).inline) {
+    // buttons under a longer message: keep its text, show the answer in their place
+    tg.editMarkup(r.bot_id, r.tg_msg_id, status === 'done' ? new InlineKeyboard().text(`→ ${result.slice(0, 60)}`, 'nop') : undefined).catch(() => {});
+  } else if (r.tg_msg_id) {
     const p = JSON.parse(r.payload);
     const tail = status === 'cancelled' ? '— no longer needed' : {
       question: `\n→ ${result.slice(0, 300)}`,
@@ -566,9 +595,14 @@ export async function handleButton(kind: string, id: string, arg?: string): Prom
     const r = requests.get(id);
     const option = r && (JSON.parse(r.payload).options as string[] | undefined)?.[Number(arg)];
     if (!r || !option || !resolveRequest(id, option)) return 'Already answered';
-    if (r.kind === 'choice') enqueueFront(r.bot_id, option);
+    if (r.kind === 'choice') {
+      const p = JSON.parse(r.payload);
+      if (p.inline && p.question) events.add(r.bot_id, `The owner tapped "${option}" under the message that ended with: ${p.question}`);
+      enqueueFront(r.bot_id, option);
+    }
     return option.slice(0, 180);
   }
+  if (kind === 'nop') return '';
   if (kind === 'hd') return resolveRequest(id, HELP_DONE) ? 'Thanks, continuing' : 'Already handled';
   if (kind === 'hc') return resolveRequest(id, HELP_DECLINED) ? 'Cancelled' : 'Already handled';
   return '';
@@ -702,6 +736,18 @@ export async function toolCall(ctx: RunContext, tool: string, a: any): Promise<R
       });
       return { result: 'The owner received a button that opens your live screen inside Telegram, where they can watch it and take control. When they tap "I\'m done, go on" there, you are told. Do not describe the button; add at most one short line.' };
     }
+    case 'voice_replies': {
+      if (ctx.role !== 'front') break;
+      if (!speechReady()) return { error: 'Spoken replies are not set up on this installation (no speech key).' };
+      const lang = a.language === undefined ? undefined : String(a.language ?? '').trim();
+      if (lang && !validVoiceSetting(lang)) return { error: 'language must be a code like pt-PT, uk-UA, en-GB or uk, or a full Azure voice name like pt-PT-DuarteNeural.' };
+      if (lang !== undefined) bots.setVoiceLang(bot.id, lang || null);
+      bots.setVoice(bot.id, !!a.enabled);
+      const set = lang !== undefined ? lang || null : bot.voice_lang;
+      if (!a.enabled) return { result: 'Spoken replies are off: your messages reach the owner as text again.' };
+      if (!multilingual()) return { result: `Spoken replies are on, but only an English voice is available here${set && !set.startsWith('en') ? `, so ${set} cannot be spoken` : ''}. Write in English and keep it short.` };
+      return { result: `Spoken replies are on: your messages reach the owner as voice messages, ${set ? `read in ${set}. Write in that language` : 'in the language each message is written in. Write in the owner\'s language'} and keep it short.` };
+    }
     case 'list_tasks':
       return { result: taskList(bot.id) || 'No tasks yet.' };
     case 'cancel_task':
@@ -763,10 +809,12 @@ export async function toolCall(ctx: RunContext, tool: string, a: any): Promise<R
     }
 
     // -------------------------------------------------------------- task only
-    case 'send_message':
+    case 'send_message': {
       if (ctx.role !== 'task') break;
-      await tg.send(bot.id, `${label}${a.text}`);
+      const b = splitButtons(String(a.text));
+      await sendWithButtons(bot.id, `${label}${b.text}`, b.options);
       return { result: 'Sent.' };
+    }
     case 'ask_choice': {
       if (ctx.role !== 'front') break;
       const options = cleanOptions(a.options);

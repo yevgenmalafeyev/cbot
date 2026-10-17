@@ -2,8 +2,9 @@
 import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
 import path from 'node:path';
 import { config } from './config.js';
-import { BotRow, bots, db, requests, secrets, tasks } from './db.js';
+import { BotRow, bots, db, events, requests, secrets, tasks } from './db.js';
 import { box } from './box.js';
+import { multilingual, speak, speechReady } from './speech.js';
 import * as agent from './agent.js';
 import { botManaged, siblings } from './fleet.js';
 
@@ -62,10 +63,20 @@ function chunks(text: string, max = 3800): string[] {
 }
 
 // ------------------------------------------------------------------- sending
-export interface SendOpts { keyboard?: InlineKeyboard; replyTo?: number; plain?: boolean }
+export interface SendOpts {
+  keyboard?: InlineKeyboard; replyTo?: number; plain?: boolean;
+  /** say it as well: the text goes out as a voice message (with the text as its caption when it fits) */
+  voice?: boolean;
+  /** language of the voice ("pt-PT", "uk", an Azure voice name); unset: guessed from the text */
+  voiceLang?: string | null;
+}
 
 /** Send text to the owner (markdown in, split if long). Returns the last message id. */
 export async function send(botId: number, text: string, opts: SendOpts = {}): Promise<number> {
+  if (opts.voice && speechReady()) {
+    const said = await sendSpoken(botId, text, opts).catch((e) => { console.error('[tg] spoken reply failed, sending text', e.message); return 0; });
+    if (said) return said;
+  }
   const parts = chunks(text || '…');
   let lastId = 0;
   for (let i = 0; i < parts.length; i++) {
@@ -97,6 +108,12 @@ export async function edit(botId: number, msgId: number, text: string, keyboard?
   }
 }
 
+/** Replace or remove the buttons under a message, leaving its text alone. */
+export async function editMarkup(botId: number, msgId: number, keyboard?: InlineKeyboard): Promise<void> {
+  await api(botId).editMessageReplyMarkup(config.ownerId, msgId, { reply_markup: keyboard })
+    .catch((e: any) => { if (!/not modified/i.test(e.message)) throw e; });
+}
+
 /** Delete one of the bot's own messages (only possible for 48 hours; older ones are left alone). */
 export const remove = (botId: number, msgId: number) => api(botId).deleteMessage(config.ownerId, msgId).then(() => true, () => false);
 
@@ -121,6 +138,32 @@ function batch(row: BotRow, part: string, msgId: number): void {
     agent.enqueueFront(row.id, b.parts.join('\n'), b.msgId);
   }, BATCH_MS);
   batches.set(row.id, b);
+}
+
+// Telegram shows a caption of up to 1024 characters under a voice message;
+// a longer text is sent as a separate message after the voice.
+const CAPTION_MAX = 1000;
+/** Speak the text and send it as a voice message. Returns 0 when there is nothing to say aloud. */
+async function sendSpoken(botId: number, text: string, opts: SendOpts): Promise<number> {
+  const a = api(botId);
+  a.sendChatAction(config.ownerId, 'record_voice').catch(() => {});
+  const audio = await speak(text, opts.voiceLang ?? null);
+  if (!audio) return 0;
+  const fits = text.length <= CAPTION_MAX;
+  const extra = {
+    ...(fits && opts.keyboard ? { reply_markup: opts.keyboard } : {}),
+    ...(opts.replyTo ? { reply_parameters: { message_id: opts.replyTo, allow_sending_without_reply: true } } : {}),
+  };
+  const file = () => new InputFile(audio, 'reply.ogg');
+  let id: number;
+  try {
+    if (!fits) throw new Error('long');
+    id = (await a.sendVoice(config.ownerId, file(), { caption: mdToHtml(text), parse_mode: 'HTML', ...extra })).message_id;
+  } catch {
+    id = (await a.sendVoice(config.ownerId, file(), fits ? { caption: text, ...extra } : extra)).message_id;
+  }
+  if (!fits) id = await send(botId, text, { ...opts, voice: false, replyTo: undefined });
+  return id;
 }
 
 export async function sendDocument(botId: number, data: Buffer, filename: string, caption?: string): Promise<void> {
@@ -194,8 +237,17 @@ export function wire(row: BotRow, bot: Bot) {
     '/screen - a link to watch and control my screen',
     '/secrets - names of stored secrets',
     '/forget <NAME> - delete a stored secret',
+    '/voice - spoken replies on or off',
     '/new - start a fresh conversation (memory file is kept)',
   ].join('\n')));
+  bot.command('voice', (ctx) => {
+    if (!speechReady()) return ctx.reply('Spoken replies are not set up (no Groq key).');
+    const on = !bots.get(row.id)?.voice;
+    bots.setVoice(row.id, on);
+    events.add(row.id, `The owner turned spoken replies ${on ? 'on' : 'off'} with /voice.`);
+    return ctx.reply(!on ? 'Spoken replies are off.'
+      : `Spoken replies are on: my messages come as voice messages${multilingual() ? '' : ', in English'}. /voice turns them off.`);
+  });
   bot.command('tasks', (ctx) => ctx.reply(agent.taskList(row.id) || 'No tasks yet.'));
   bot.command('schedules', (ctx) => ctx.reply(agent.scheduleList(row.id) || 'No schedules. Ask me in plain words to set one up.'));
   bot.command('cancel', async (ctx) => {
@@ -274,6 +326,7 @@ export async function startBot(row: BotRow): Promise<void> {
     { command: 'schedules', description: 'Recurring and planned tasks' },
     { command: 'screen', description: 'Watch my screen' },
     { command: 'cancel', description: 'Stop a task: /cancel <id>' },
+    { command: 'voice', description: 'Spoken replies on/off' },
     { command: 'new', description: 'Fresh conversation' },
     { command: 'help', description: 'All commands' },
   ]).catch(() => {});

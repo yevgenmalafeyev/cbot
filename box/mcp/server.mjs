@@ -124,7 +124,7 @@ if (ROLE === 'front') {
   coreTool('connect_imap', 'Connect a non-Gmail mailbox over IMAP/SMTP. The owner gets a private page for the password; the login is verified before the account is saved.',
     { address: z.string(), imap_host: z.string(), imap_port: z.number().int().optional().describe('default 993'),
       smtp_host: z.string(), smtp_port: z.number().int().optional().describe('default 465'), username: z.string().optional().describe('default: the address') });
-  coreTool('mail_disconnect', 'Remove a connected mail account from this bot.', { account: z.string() });
+  coreTool('mail_disconnect', 'Remove a connected mail account from this bot and, for Gmail, revoke its access at Google. Its watches are deleted. Do it here, not in a task.', { account: z.string() });
   coreTool('mail_watch_create',
     'Watch a mailbox for future messages matching a search and start a background task for each one. Checking costs nothing; use it for "when X writes, do Y" and for waiting on a specific reply. Messages that do not match are ignored. The owner sees the brief and confirms it with a button before the watch starts.',
     { account: z.string(), title: z.string(), query: z.string().describe('Gmail search syntax, e.g. from:support@acme.com subject:refund. On IMAP accounts only from:, to:, subject:, is:unread and plain words work.'),
@@ -136,6 +136,10 @@ if (ROLE === 'front') {
   coreTool('share_screen',
     'Send the owner a button that opens your live desktop inside Telegram, where they can watch it and take control with mouse and keyboard. Use it when they ask to see your screen or to do something on it themselves. Returns immediately.',
     { note: z.string().optional().describe('One short line shown above the button, in the owner\'s language') });
+  coreTool('voice_replies',
+    'Turn spoken replies on or off for this chat, and choose their language. On: every message you send the owner (and task results) is read aloud and arrives as a Telegram voice message with the text attached. Use it when the owner asks to hear you, for a language or accent, or to stop.',
+    { enabled: z.boolean(),
+      language: z.string().optional().describe('Language and accent of the voice: "pt-PT" (European Portuguese), "pt-BR", "uk-UA", "ru-RU", "en-GB", "en-US" and so on, or a full Azure voice name such as "pt-PT-DuarteNeural" for a particular voice. Empty string: guess from each message. Omit to keep the current setting.') });
   coreTool('list_tasks', 'List recent tasks of this bot with their status and latest progress line.', {});
   coreTool('cancel_task', 'Stop a running or queued task.', { task_id: z.number().int() });
   coreTool('answer_task',
