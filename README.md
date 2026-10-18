@@ -30,6 +30,10 @@ exactly one Telegram account: yours.
   Gmail account also revokes the bot's access at Google.
 - **Tap to answer.** Whenever a bot asks you something with a few likely
   answers, they come as buttons under its message; a tap is your reply.
+- **A like is an answer.** React 👍 to a bot's message and it takes that as a
+  yes, without a word back. When all it has to say is OK, it likes your
+  message instead of writing. Reply to (quote) an earlier message and the bot
+  knows which one you mean.
 - **Schedules.** Recurring (cron) and one-off tasks. Scheduled and
   mail-triggered runs work out of sight and message you only when they have
   something for you.

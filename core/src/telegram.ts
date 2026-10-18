@@ -2,7 +2,7 @@
 import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
 import path from 'node:path';
 import { config } from './config.js';
-import { BotRow, bots, db, events, requests, secrets, tasks } from './db.js';
+import { BotRow, bots, db, events, messages, requests, secrets, tasks } from './db.js';
 import { box } from './box.js';
 import { multilingual, speak, speechReady } from './speech.js';
 import * as agent from './agent.js';
@@ -93,6 +93,7 @@ export async function send(botId: number, text: string, opts: SendOpts = {}): Pr
       // unbalanced markup: the text matters more than the formatting
       lastId = (await api(botId).sendMessage(config.ownerId, parts[i], extra)).message_id;
     }
+    messages.put(botId, lastId, 'bot', parts[i]);
   }
   return lastId;
 }
@@ -100,6 +101,7 @@ export async function send(botId: number, text: string, opts: SendOpts = {}): Pr
 export async function edit(botId: number, msgId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
   const extra = { link_preview_options: { is_disabled: true }, ...(keyboard ? { reply_markup: keyboard } : {}) };
   const body = text.length > 3900 ? text.slice(0, 3900) + '…' : text;
+  messages.put(botId, msgId, 'bot', body);
   try {
     await api(botId).editMessageText(config.ownerId, msgId, mdToHtml(body), { parse_mode: 'HTML', ...extra });
   } catch (e: any) {
@@ -163,6 +165,7 @@ async function sendSpoken(botId: number, text: string, opts: SendOpts): Promise<
     id = (await a.sendVoice(config.ownerId, file(), fits ? { caption: text, ...extra } : extra)).message_id;
   }
   if (!fits) id = await send(botId, text, { ...opts, voice: false, replyTo: undefined });
+  else messages.put(botId, id, 'bot', text);
   return id;
 }
 
@@ -189,12 +192,23 @@ async function transcribe(audio: Buffer, filename: string): Promise<string> {
   return ((await res.json()) as { text: string }).text.trim();
 }
 
-async function saveToInbox(row: BotRow, data: Buffer, name: string): Promise<string> {
+// The message id keeps the path unique: the photos of an album all arrive
+// within the same second under the same name ("photo.jpg").
+async function saveToInbox(row: BotRow, msgId: number, data: Buffer, name: string): Promise<string> {
   const safe = name.replace(/[^\w.\-() ]+/g, '_').slice(-120) || 'file';
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
-  const p = `/home/bot/inbox/${row.slug}/${stamp}-${safe}`;
+  const p = `/home/bot/inbox/${row.slug}/${stamp}-${msgId}-${safe}`;
   await box.putFile(p, data);
   return p;
+}
+
+/** What a message said, for quoting it back to the model: its text, or what kind of thing it was. */
+function gist(m: any, max = 600): string {
+  const text: string = m.text ?? m.caption ?? '';
+  const kind = m.photo ? 'a photo' : m.voice || m.audio ? 'a voice message' : m.video_note ? 'a video message'
+    : m.document ? `the file ${m.document.file_name ?? ''}`.trim() : m.video ? 'a video' : m.sticker ? 'a sticker' : '';
+  const t = text.length > max ? text.slice(0, max) + '…' : text;
+  return kind ? (t ? `${kind}: "${t}"` : kind) : `"${t}"`;
 }
 
 /** The main bot's username and whether Telegram lets it create bots for its owner ("Bot Management Mode"). */
@@ -294,10 +308,12 @@ export function wire(row: BotRow, bot: Bot) {
         const size = (doc ?? photo)!.file_size ?? 0;
         if (size > 20 * 1024 * 1024) { await ctx.reply('Telegram only lets bots download files up to 20 MB.'); return; }
         const name = (doc && 'file_name' in doc && doc.file_name) || (photo ? 'photo.jpg' : 'file');
-        const saved = await saveToInbox(row, await download(bot, (doc ?? photo)!.file_id), path.basename(name));
+        const saved = await saveToInbox(row, m.message_id, await download(bot, (doc ?? photo)!.file_id), path.basename(name));
         notes.push(`[system] The owner sent a file, saved at ${saved}`);
       }
       if (!text && !notes.length) return;
+
+      if (text) messages.put(row.id, m.message_id, 'owner', text);
 
       // A reply to a task's question goes straight to that task.
       const replied = m.reply_to_message && requests.byMessage(row.id, m.reply_to_message.message_id);
@@ -306,11 +322,37 @@ export function wire(row: BotRow, bot: Bot) {
         await ctx.react('👌').catch(() => {});
         return;
       }
-      batch(row, [text, ...notes].filter(Boolean).join('\n'), m.message_id);
+      // Any other reply: the model is shown what the owner is referring to.
+      const quoted = m.reply_to_message as any;
+      const context = quoted
+        ? `[system] The owner replies to ${quoted.from?.id === config.ownerId ? 'their own earlier message' : 'your message'}${
+          m.quote ? `, quoting this part of it: "${m.quote.text}"` : `: ${gist(quoted)}`}`
+        : '';
+      batch(row, [context, text, ...notes].filter(Boolean).join('\n'), m.message_id);
     } catch (e: any) {
       console.error(`[tg:${row.slug}]`, e);
       await ctx.reply(`Could not process that message: ${e.message}`).catch(() => {});
     }
+  });
+
+  // A reaction on a message is the owner's answer to it, without a message of
+  // their own. Telegram sends only the message id; the text is kept in the db.
+  bot.on('message_reaction', (ctx) => {
+    const r = ctx.messageReaction!;
+    const added = r.new_reaction.filter((n) => !r.old_reaction.some((o) => JSON.stringify(o) === JSON.stringify(n)));
+    if (!added.length) return;                       // a reaction was removed: nothing to act on
+    const emoji = added.map((x) => x.type === 'emoji' ? x.emoji : x.type === 'paid' ? '⭐' : 'a custom emoji').join(' ');
+    const known = messages.get(row.id, r.message_id);
+    const target = !known ? 'an earlier message' : known.who === 'owner' ? `their own message "${known.text}"` : `your message "${known.text}"`;
+    const pending = requests.byMessage(row.id, r.message_id);
+    let note = '';
+    if (pending?.kind === 'choice') {
+      // the reaction stands in for a tap: the buttons are stale now
+      note = ` The buttons under it were: ${(JSON.parse(pending.payload).options as string[]).join(' | ')}.`;
+      agent.dropChoices(row.id);
+    } else if (pending) note = ' That message waits for a button tap or a reply, which a reaction does not replace.';
+    events.add(row.id, `The owner reacted ${emoji} to ${target}.${note}`);
+    agent.enqueueFront(row.id, null);
   });
 
   bot.catch((err) => console.error(`[tg:${row.slug}]`, err.error));
@@ -334,7 +376,7 @@ export async function startBot(row: BotRow): Promise<void> {
     .catch((e) => console.error(`[tg:${row.slug}] menu button`, e.message));
   // long polling; resolves only when the bot stops
   bot.start({
-    allowed_updates: ['message', 'callback_query', ...(row.token_enc ? [] : ['managed_bot'])] as any,
+    allowed_updates: ['message', 'message_reaction', 'callback_query', ...(row.token_enc ? [] : ['managed_bot'])] as any,
     onStart: (me) => {
       console.log(`[tg:${row.slug}] polling as @${me.username}`);
       if (!me.has_main_web_app && !(bots.get(row.id) as any)?.app_hinted) send(row.id, appHint(row, me.username)).catch(() => {});

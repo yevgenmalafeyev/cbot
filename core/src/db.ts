@@ -83,6 +83,14 @@ CREATE TABLE IF NOT EXISTS events (   -- notes for a bot's chat session, deliver
   bot_id INTEGER NOT NULL,
   text   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS messages ( -- recent chat messages by Telegram id, so a reaction can be tied to its text
+  bot_id     INTEGER NOT NULL,
+  msg_id     INTEGER NOT NULL,
+  who        TEXT NOT NULL,           -- bot | owner
+  text       TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (bot_id, msg_id)
+);
 `);
 
 export interface BotRow {
@@ -302,4 +310,17 @@ export const events = {
     if (rows.length) db.prepare(`DELETE FROM events WHERE id <= ? AND bot_id = ?`).run(rows[rows.length - 1].id, botId);
     return rows.map((r) => r.text);
   },
+};
+
+// Telegram tells a bot which message was reacted to, not what it said; the
+// text is looked up here. A month is kept, which is longer than anyone reacts.
+const MESSAGE_KEEP_MS = 30 * 86400_000;
+export const messages = {
+  put(botId: number, msgId: number, who: 'bot' | 'owner', text: string): void {
+    db.prepare('INSERT OR REPLACE INTO messages (bot_id, msg_id, who, text, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(botId, msgId, who, text.slice(0, 2000), now());
+    if (Math.random() < 0.01) db.prepare('DELETE FROM messages WHERE created_at < ?').run(now() - MESSAGE_KEEP_MS);
+  },
+  get: (botId: number, msgId: number) =>
+    db.prepare('SELECT who, text FROM messages WHERE bot_id = ? AND msg_id = ?').get(botId, msgId) as { who: 'bot' | 'owner'; text: string } | undefined,
 };
